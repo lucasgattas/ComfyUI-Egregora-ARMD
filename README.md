@@ -381,12 +381,8 @@ See `ATTRIBUTION.md` for details. 📄
 
 ---
 
-## ❤️ Status
+## 💛 Acknowledgements
 
-Egregora-ARMD is in the stage where the core nodes are ready for real-world workflow validation and broader user testing.
+This project is part of the broader creative and technical ecosystem around ComfyUI and regional diffusion workflows.
 
-The current focus is:
-
-- validating behavior in practical upscale workflows
-- refining prompt ergonomics
-- preparing public examples and workflows
+Special thanks to the ComfyUI community for building the tools, discussions, and experimentation culture that make projects like this possible.
