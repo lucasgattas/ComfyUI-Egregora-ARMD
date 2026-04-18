@@ -14,7 +14,7 @@ from comfy.utils import repeat_to_batch_size
 # version
 # ============================================================
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 
 # ============================================================
@@ -479,6 +479,81 @@ def slice_spatial_tensor(
     return torch.cat(slices, dim=0)
 
 
+def scale_region_extent_to_tensor(
+    *,
+    full_latent_extent: int,
+    tensor_extent: int,
+    region_extent: int,
+) -> int:
+    if full_latent_extent <= 0 or tensor_extent <= 0:
+        raise ValueError("full_latent_extent and tensor_extent must be positive")
+    scaled = int(math.floor((region_extent * tensor_extent) / full_latent_extent))
+    return max(1, min(tensor_extent, scaled))
+
+
+def fixed_count_axis_positions(full_size: int, tile_size: int, count: int) -> list[int]:
+    if count <= 1 or tile_size >= full_size:
+        return [0]
+    last_start = max(0, full_size - tile_size)
+    return [int(round((i / (count - 1)) * last_start)) for i in range(count)]
+
+
+def build_scaled_bboxes_for_plan(
+    region_plan: RegionPlan,
+    *,
+    tensor_height: int,
+    tensor_width: int,
+) -> list[RegionBBox]:
+    tile_w = scale_region_extent_to_tensor(
+        full_latent_extent=region_plan.latent_width,
+        tensor_extent=tensor_width,
+        region_extent=region_plan.region_width_latent,
+    )
+    tile_h = scale_region_extent_to_tensor(
+        full_latent_extent=region_plan.latent_height,
+        tensor_extent=tensor_height,
+        region_extent=region_plan.region_height_latent,
+    )
+
+    xs = fixed_count_axis_positions(tensor_width, tile_w, region_plan.cols)
+    ys = fixed_count_axis_positions(tensor_height, tile_h, region_plan.rows)
+
+    bboxes: list[RegionBBox] = []
+    for y in ys:
+        for x in xs:
+            bboxes.append(RegionBBox(x=x, y=y, w=tile_w, h=tile_h))
+    return bboxes
+
+
+def slice_spatial_tensor_for_region_batch(
+    tensor: torch.Tensor,
+    batch: "RuntimeRegionBatch",
+    region_plan: RegionPlan,
+    *,
+    latent_height: int,
+    latent_width: int,
+) -> torch.Tensor:
+    if tensor.ndim != 4:
+        raise ValueError("spatial tensor must be 4D")
+
+    if tensor.shape[-2] == latent_height and tensor.shape[-1] == latent_width:
+        bboxes = batch.latent_bboxes
+    else:
+        scaled_bboxes = build_scaled_bboxes_for_plan(
+            region_plan,
+            tensor_height=tensor.shape[-2],
+            tensor_width=tensor.shape[-1],
+        )
+        if len(scaled_bboxes) != region_plan.region_count:
+            raise ValueError("scaled bbox count mismatch")
+        bboxes = [scaled_bboxes[i] for i in batch.region_indices]
+
+    slices = [tensor[:, :, bbox.y:bbox.y2, bbox.x:bbox.x2] for bbox in bboxes]
+    if not slices:
+        raise ValueError("bboxes must be non-empty")
+    return torch.cat(slices, dim=0)
+
+
 def latent_dict_to_tensor(latent: dict[str, Any]) -> torch.Tensor:
     samples = latent.get("samples", None)
     if not isinstance(samples, torch.Tensor):
@@ -759,31 +834,25 @@ def _slice_control_value_for_batch(
     value: Any,
     batch: RuntimeRegionBatch,
     latent: torch.Tensor,
+    region_plan: RegionPlan,
 ) -> Any:
     if isinstance(value, torch.Tensor) and value.ndim == 4:
-        layout = infer_spatial_tensor_layout(
-            latent_height=latent.shape[-2],
-            latent_width=latent.shape[-1],
-            tensor_height=value.shape[-2],
-            tensor_width=value.shape[-1],
-        )
-        if layout is None:
-            return value
-        return slice_spatial_tensor(
+        return slice_spatial_tensor_for_region_batch(
             value,
-            batch.latent_bboxes,
+            batch,
+            region_plan,
             latent_height=latent.shape[-2],
             latent_width=latent.shape[-1],
         )
 
     if isinstance(value, list):
-        return [_slice_control_value_for_batch(item, batch, latent) for item in value]
+        return [_slice_control_value_for_batch(item, batch, latent, region_plan) for item in value]
 
     if isinstance(value, tuple):
-        return tuple(_slice_control_value_for_batch(item, batch, latent) for item in value)
+        return tuple(_slice_control_value_for_batch(item, batch, latent, region_plan) for item in value)
 
     if isinstance(value, dict):
-        return {k: _slice_control_value_for_batch(v, batch, latent) for k, v in value.items()}
+        return {k: _slice_control_value_for_batch(v, batch, latent, region_plan) for k, v in value.items()}
 
     return value
 
@@ -792,8 +861,9 @@ def slice_control_dict_for_batch(
     control_dict: dict[str, Any],
     batch: RuntimeRegionBatch,
     latent: torch.Tensor,
+    region_plan: RegionPlan,
 ) -> dict[str, Any]:
-    return {k: _slice_control_value_for_batch(v, batch, latent) for k, v in control_dict.items()}
+    return {k: _slice_control_value_for_batch(v, batch, latent, region_plan) for k, v in control_dict.items()}
 
 
 def _debug_print_control_dict_shapes(control_dict: dict[str, Any], prefix: str = "[Egregora-ARMD]") -> None:
@@ -824,12 +894,13 @@ def clone_control_chain_for_batch(
     control: Any,
     batch: RuntimeRegionBatch,
     latent: torch.Tensor,
+    region_plan: RegionPlan,
 ) -> Any:
     # Advanced-ControlNet in this workflow passes a dict of precomputed residuals
     # under c["control"]. Slice those residuals per region batch and hand the
     # regionalized dict directly to the UNet wrapper.
     if isinstance(control, dict):
-        return slice_control_dict_for_batch(control, batch, latent)
+        return slice_control_dict_for_batch(control, batch, latent, region_plan)
     return control
 
 
@@ -876,19 +947,13 @@ class EgregoraAdaptiveRegionalMixer:
 
     def _slice_condition_value(self, value: Any, batch: RuntimeRegionBatch, latent: torch.Tensor) -> Any:
         if isinstance(value, torch.Tensor) and value.ndim == 4:
-            layout = infer_spatial_tensor_layout(
+            return slice_spatial_tensor_for_region_batch(
+                value,
+                batch,
+                self.runtime_inputs.region_plan,
                 latent_height=latent.shape[-2],
                 latent_width=latent.shape[-1],
-                tensor_height=value.shape[-2],
-                tensor_width=value.shape[-1],
             )
-            if layout is not None:
-                return slice_spatial_tensor(
-                    value,
-                    batch.latent_bboxes,
-                    latent_height=latent.shape[-2],
-                    latent_width=latent.shape[-1],
-                )
         return value
 
     def _build_adapter_payload(self, latent: torch.Tensor, timestep: torch.Tensor, cond_dict: dict) -> dict[str, Any]:
@@ -949,7 +1014,7 @@ class EgregoraAdaptiveRegionalMixer:
                 if key == "c_crossattn":
                     continue
                 if key == "control":
-                    control_obj = clone_control_chain_for_batch(value, batch, latent)
+                    control_obj = clone_control_chain_for_batch(value, batch, latent, self.runtime_inputs.region_plan)
                     if self.runtime_inputs.debug_runtime and not getattr(self, "_control_debug_logged", False):
                         print("[Egregora-ARMD] control object type:", type(value))
                         if isinstance(value, dict):
