@@ -1,4 +1,4 @@
-#🌐 Egregora ARMD
+#Egregora ARMD
 
 **ARMD** stands for **Adaptive Regional Mixture of Diffusers**.
 
