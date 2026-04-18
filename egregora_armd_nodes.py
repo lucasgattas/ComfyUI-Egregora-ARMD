@@ -14,7 +14,7 @@ from comfy.utils import repeat_to_batch_size
 # version
 # ============================================================
 
-__version__ = "0.1.1"
+__version__ = "0.1.4"
 
 
 # ============================================================
@@ -26,11 +26,6 @@ def ceildiv(a: int, b: int) -> int:
         raise ZeroDivisionError("b must be non-zero")
     return -(a // -b)
 
-
-def nearest_multiple(v: int, mult: int) -> int:
-    if mult <= 0:
-        raise ValueError("mult must be positive")
-    return max(mult, int(round(v / mult)) * mult)
 
 
 def floor_multiple(v: int, mult: int) -> int:
@@ -102,11 +97,18 @@ class RegionBBox:
 
 @dataclass(frozen=True)
 class RegionPlan:
+    original_width: int
+    original_height: int
     aligned_width: int
     aligned_height: int
     latent_width: int
     latent_height: int
     compression: int
+    alignment_mode: str
+    pad_left: int
+    pad_top: int
+    pad_right: int
+    pad_bottom: int
     region_width: int
     region_height: int
     region_overlap: int
@@ -142,55 +144,113 @@ def resize_bhwc(image: torch.Tensor, width: int, height: int, mode: str = "bilin
     return image_bchw_to_bhwc(x)
 
 
-def choose_keep_proportion_dims(width: int, height: int, mult: int) -> tuple[int, int]:
-    candidates = []
+def pad_bhwc(
+    image: torch.Tensor,
+    *,
+    pad_left: int,
+    pad_right: int,
+    pad_top: int,
+    pad_bottom: int,
+    mode: str = "reflect",
+    value: float = 0.0,
+) -> torch.Tensor:
+    """Pad a BHWC image while staying compatible with older call sites.
 
-    for w2 in {floor_multiple(width, mult), nearest_multiple(width, mult), ceil_multiple(width, mult)}:
-        scale = w2 / width
-        h2 = max(mult, int(round((height * scale) / mult)) * mult)
-        candidates.append((w2, h2))
+    Supported modes:
+    - "reflect": default and recommended; falls back to "replicate" when
+      PyTorch reflect padding would be invalid for the current image/pad sizes.
+    - "replicate" / "edge": edge padding.
+    - "constant": constant-value padding.
 
-    for h2 in {floor_multiple(height, mult), nearest_multiple(height, mult), ceil_multiple(height, mult)}:
-        scale = h2 / height
-        w2 = max(mult, int(round((width * scale) / mult)) * mult)
-        candidates.append((w2, h2))
+    The simplified ARMD UI only exposes reflect-based padding, but keeping these
+    arguments prevents older internal calls or saved workflows from breaking.
+    """
+    if pad_left == 0 and pad_right == 0 and pad_top == 0 and pad_bottom == 0:
+        return image
 
-    original_ratio = width / height
-    best = None
-    best_score = None
-    for w2, h2 in candidates:
-        ratio = w2 / h2
-        size_delta = abs((w2 / width) - 1.0) + abs((h2 / height) - 1.0)
-        ratio_delta = abs(ratio - original_ratio)
-        score = size_delta + (ratio_delta * 10.0)
-        if best is None or score < best_score:
-            best = (w2, h2)
-            best_score = score
-    return best
+    x = image_bhwc_to_bchw(image)
+    _, _, h, w = x.shape
+    pad = (pad_left, pad_right, pad_top, pad_bottom)
+
+    normalized_mode = str(mode).lower().strip()
+    if normalized_mode == "edge":
+        normalized_mode = "replicate"
+
+    if normalized_mode == "reflect":
+        reflect_invalid = (
+            h < 2 or w < 2 or pad_top >= h or pad_bottom >= h or pad_left >= w or pad_right >= w
+        )
+        torch_mode = "replicate" if reflect_invalid else "reflect"
+        x = F.pad(x, pad, mode=torch_mode)
+    elif normalized_mode == "replicate":
+        x = F.pad(x, pad, mode="replicate")
+    elif normalized_mode == "constant":
+        x = F.pad(x, pad, mode="constant", value=float(value))
+    else:
+        raise ValueError(f"unsupported pad mode: {mode}")
+
+    return image_bchw_to_bhwc(x)
 
 
-def align_image_to_compression(image: torch.Tensor, compression: int, alignment_mode: str) -> torch.Tensor:
+
+def align_image_to_compression(
+    image: torch.Tensor,
+    compression: int,
+    alignment_mode: str,
+) -> tuple[torch.Tensor, dict[str, int | str]]:
     _, h, w, _ = image.shape
 
-    if alignment_mode == "floor_crop":
+    # Keep legacy values loadable for old workflows, but simplify the public UI
+    # to the two modes that are actually useful in practice.
+    if alignment_mode in {"pad_bottom_right_reflect", "pad_symmetric_reflect"}:
+        normalized_mode = "pad_reflect"
+    elif alignment_mode == "floor_crop":
+        normalized_mode = "floor_crop"
+    else:
+        normalized_mode = alignment_mode
+
+    meta: dict[str, int | str] = {
+        "original_width": w,
+        "original_height": h,
+        "alignment_mode": normalized_mode,
+        "pad_left": 0,
+        "pad_top": 0,
+        "pad_right": 0,
+        "pad_bottom": 0,
+    }
+
+    if normalized_mode == "floor_crop":
         new_w = floor_multiple(w, compression)
         new_h = floor_multiple(h, compression)
-        return image[:, :new_h, :new_w, :]
+        return image[:, :new_h, :new_w, :], meta
 
-    if alignment_mode == "stretch_resize":
-        new_w = nearest_multiple(w, compression)
-        new_h = nearest_multiple(h, compression)
-        if new_w == w and new_h == h:
-            return image
-        return resize_bhwc(image, new_w, new_h)
+    if normalized_mode != "pad_reflect":
+        raise ValueError(f"unsupported alignment_mode: {alignment_mode}")
 
-    if alignment_mode == "keep_proportion_resize":
-        new_w, new_h = choose_keep_proportion_dims(w, h, compression)
-        if new_w == w and new_h == h:
-            return image
-        return resize_bhwc(image, new_w, new_h)
+    pad_w = (ceil_multiple(w, compression) - w) % compression
+    pad_h = (ceil_multiple(h, compression) - h) % compression
+    pad_left = 0
+    pad_top = 0
+    pad_right = pad_w
+    pad_bottom = pad_h
 
-    raise ValueError(f"unsupported alignment_mode: {alignment_mode}")
+    meta.update({
+        "pad_left": pad_left,
+        "pad_top": pad_top,
+        "pad_right": pad_right,
+        "pad_bottom": pad_bottom,
+    })
+
+    aligned = pad_bhwc(
+        image,
+        pad_left=pad_left,
+        pad_right=pad_right,
+        pad_top=pad_top,
+        pad_bottom=pad_bottom,
+        mode="reflect",
+        value=0.0,
+    )
+    return aligned, meta
 
 
 def build_region_plan(
@@ -200,6 +260,14 @@ def build_region_plan(
     region_height: int,
     region_overlap: int,
     compression: int,
+    *,
+    original_width: int | None = None,
+    original_height: int | None = None,
+    alignment_mode: str = "unknown",
+    pad_left: int = 0,
+    pad_top: int = 0,
+    pad_right: int = 0,
+    pad_bottom: int = 0,
 ) -> RegionPlan:
     if region_width % compression != 0:
         raise ValueError("region_width must be divisible by compression")
@@ -242,11 +310,18 @@ def build_region_plan(
             bboxes_pixel.append(pix)
 
     return RegionPlan(
+        original_width=aligned_width if original_width is None else original_width,
+        original_height=aligned_height if original_height is None else original_height,
         aligned_width=aligned_width,
         aligned_height=aligned_height,
         latent_width=latent_width,
         latent_height=latent_height,
         compression=compression,
+        alignment_mode=alignment_mode,
+        pad_left=pad_left,
+        pad_top=pad_top,
+        pad_right=pad_right,
+        pad_bottom=pad_bottom,
         region_width=effective_region_width,
         region_height=effective_region_height,
         region_overlap=effective_region_overlap,
@@ -375,108 +450,6 @@ def merge_runtime_adapters(*adapters: RuntimePayloadAdapter | None) -> RuntimePa
 # ============================================================
 # spatial controls / adapters
 # ============================================================
-
-@dataclass(frozen=True)
-class SpatialTensorLayout:
-    latent_height: int
-    latent_width: int
-    tensor_height: int
-    tensor_width: int
-    scale_y_num: int
-    scale_y_den: int
-    scale_x_num: int
-    scale_x_den: int
-
-
-def infer_spatial_tensor_layout(
-    latent_height: int,
-    latent_width: int,
-    tensor_height: int,
-    tensor_width: int,
-) -> SpatialTensorLayout | None:
-    if tensor_height <= 0 or tensor_width <= 0:
-        return None
-
-    if tensor_height == 1 and tensor_width == 1:
-        return None
-
-    if tensor_height == latent_height and tensor_width == latent_width:
-        return SpatialTensorLayout(
-            latent_height=latent_height,
-            latent_width=latent_width,
-            tensor_height=tensor_height,
-            tensor_width=tensor_width,
-            scale_y_num=1,
-            scale_y_den=1,
-            scale_x_num=1,
-            scale_x_den=1,
-        )
-
-    if tensor_height % latent_height == 0 and tensor_width % latent_width == 0:
-        sy = tensor_height // latent_height
-        sx = tensor_width // latent_width
-        return SpatialTensorLayout(
-            latent_height=latent_height,
-            latent_width=latent_width,
-            tensor_height=tensor_height,
-            tensor_width=tensor_width,
-            scale_y_num=sy,
-            scale_y_den=1,
-            scale_x_num=sx,
-            scale_x_den=1,
-        )
-
-    if latent_height % tensor_height == 0 and latent_width % tensor_width == 0:
-        sy = latent_height // tensor_height
-        sx = latent_width // tensor_width
-        return SpatialTensorLayout(
-            latent_height=latent_height,
-            latent_width=latent_width,
-            tensor_height=tensor_height,
-            tensor_width=tensor_width,
-            scale_y_num=1,
-            scale_y_den=sy,
-            scale_x_num=1,
-            scale_x_den=sx,
-        )
-
-    return None
-
-
-def slice_spatial_tensor(
-    tensor: torch.Tensor,
-    bboxes: Sequence[RegionBBox],
-    *,
-    latent_height: int,
-    latent_width: int,
-) -> torch.Tensor:
-    if tensor.ndim != 4:
-        raise ValueError("spatial tensor must be 4D")
-
-    layout = infer_spatial_tensor_layout(
-        latent_height=latent_height,
-        latent_width=latent_width,
-        tensor_height=tensor.shape[-2],
-        tensor_width=tensor.shape[-1],
-    )
-    if layout is None:
-        raise ValueError(
-            f"tensor spatial size {tensor.shape[-2:]} is not compatible with latent "
-            f"size {(latent_height, latent_width)}"
-        )
-
-    slices = []
-    for bbox in bboxes:
-        y1 = (bbox.y * layout.scale_y_num) // layout.scale_y_den
-        y2 = (bbox.y2 * layout.scale_y_num) // layout.scale_y_den
-        x1 = (bbox.x * layout.scale_x_num) // layout.scale_x_den
-        x2 = (bbox.x2 * layout.scale_x_num) // layout.scale_x_den
-        slices.append(tensor[:, :, y1:y2, x1:x2])
-
-    if not slices:
-        raise ValueError("bboxes must be non-empty")
-
-    return torch.cat(slices, dim=0)
 
 
 def scale_region_extent_to_tensor(
@@ -1083,8 +1056,11 @@ class EgregoraRegionPlan:
                 "region_overlap": ("INT", {"default": 64, "min": 0, "max": 2048, "step": 8}),
                 "compression": ("INT", {"default": 8, "min": 1, "max": 16, "step": 1}),
                 "alignment_mode": (
-                    ["keep_proportion_resize", "stretch_resize", "floor_crop"],
-                    {"default": "keep_proportion_resize"},
+                    [
+                        "pad_reflect",
+                        "floor_crop",
+                    ],
+                    {"default": "pad_reflect"},
                 ),
             }
         }
@@ -1096,8 +1072,9 @@ class EgregoraRegionPlan:
     CATEGORY = "Egregora-ARMD"
 
     def plan(self, image, region_width, region_height, region_overlap, compression, alignment_mode):
-        aligned = align_image_to_compression(image, compression, alignment_mode)
+        aligned, alignment_meta = align_image_to_compression(image, compression, alignment_mode)
         _, h, w, _ = aligned.shape
+        _, original_h, original_w, _ = image.shape
         plan = build_region_plan(
             aligned_width=w,
             aligned_height=h,
@@ -1105,6 +1082,13 @@ class EgregoraRegionPlan:
             region_height=region_height,
             region_overlap=region_overlap,
             compression=compression,
+            original_width=original_w,
+            original_height=original_h,
+            alignment_mode=str(alignment_meta["alignment_mode"]),
+            pad_left=int(alignment_meta["pad_left"]),
+            pad_top=int(alignment_meta["pad_top"]),
+            pad_right=int(alignment_meta["pad_right"]),
+            pad_bottom=int(alignment_meta["pad_bottom"]),
         )
         regions = extract_region_images(aligned, plan)
         regions_batch = torch.cat(regions, dim=0) if regions else aligned[:0]
@@ -1362,6 +1346,41 @@ class EgregoraAdaptiveDiffusionApply:
         return (patched,)
 
 
+class EgregoraRestoreOriginalSize:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+                "region_plan": ("EGREGORA_REGION_PLAN",),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("restored_image",)
+    FUNCTION = "restore"
+    CATEGORY = "Egregora-ARMD"
+
+    def restore(self, image, region_plan: RegionPlan):
+        _, h, w, _ = image.shape
+        target_h = int(region_plan.original_height)
+        target_w = int(region_plan.original_width)
+
+        if h == target_h and w == target_w:
+            return (image,)
+
+        if any((region_plan.pad_left, region_plan.pad_top, region_plan.pad_right, region_plan.pad_bottom)):
+            y1 = int(region_plan.pad_top)
+            x1 = int(region_plan.pad_left)
+            y2 = y1 + target_h
+            x2 = x1 + target_w
+            if y2 <= h and x2 <= w:
+                return (image[:, y1:y2, x1:x2, :],)
+
+        restored = resize_bhwc(image, target_w, target_h)
+        return (restored,)
+
+
 NODE_CLASS_MAPPINGS = {
     "EgregoraRegionPlan": EgregoraRegionPlan,
     "EgregoraRegionalConditioning": EgregoraRegionalConditioning,
@@ -1370,6 +1389,7 @@ NODE_CLASS_MAPPINGS = {
     "EgregoraSpatialTensorPack": EgregoraSpatialTensorPack,
     "EgregoraStaticPayloadPack": EgregoraStaticPayloadPack,
     "EgregoraRuntimeAdapterMerge": EgregoraRuntimeAdapterMerge,
+    "EgregoraRestoreOriginalSize": EgregoraRestoreOriginalSize,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -1380,4 +1400,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "EgregoraSpatialTensorPack": "🧩 Egregora Spatial Tensor Pack",
     "EgregoraStaticPayloadPack": "📦 Egregora Static Payload Pack",
     "EgregoraRuntimeAdapterMerge": "🔗 Egregora Runtime Adapter Merge",
+    "EgregoraRestoreOriginalSize": "📐 Egregora Restore Original Size",
 }
