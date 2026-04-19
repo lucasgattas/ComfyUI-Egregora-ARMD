@@ -14,7 +14,7 @@ from comfy.utils import repeat_to_batch_size
 # version
 # ============================================================
 
-__version__ = "0.2.2"
+__version__ = "0.2.4"
 
 
 # ============================================================
@@ -663,41 +663,47 @@ def fit_image_to_exact_canvas(
     target_height: int,
     alignment_mode: str,
 ) -> tuple[torch.Tensor, dict[str, int | str]]:
-    """Fit an IMAGE tensor to an exact target canvas without introducing resize deformation.
+    """Fit an IMAGE tensor to an exact target canvas when a LATENT defines the canvas size.
 
-    When a LATENT is provided to Region Plan, the target canvas must match the latent size exactly.
-    This helper keeps the existing top-left anchored behavior:
-    - crop excess on the bottom/right when the image is larger than target
-    - reflect-pad on the bottom/right when the image is smaller than target
+    Important behavior:
+    - If the aspect ratio already matches the target canvas, resize exactly to the target.
+      This keeps IMAGE and LATENT synchronized without introducing mirrored reflect-padding.
+    - If the aspect ratio does not match, fail loudly instead of silently distorting or
+      creating reflected borders. The user can then resize/crop upstream in a controlled way.
+
+    We intentionally report zero padding here because this path is an exact canvas fit,
+    not a padding-based alignment step.
     """
     _, h, w, _ = image.shape
-    normalized_mode = "floor_crop" if alignment_mode == "floor_crop" else "pad_reflect"
-    cropped = image[:, :min(h, target_height), :min(w, target_width), :]
-    _, ch, cw, _ = cropped.shape
-    pad_right = max(0, int(target_width) - int(cw))
-    pad_bottom = max(0, int(target_height) - int(ch))
-    pad_left = 0
-    pad_top = 0
-    if pad_right or pad_bottom:
-        cropped = pad_bhwc(
-            cropped,
-            pad_left=pad_left,
-            pad_right=pad_right,
-            pad_top=pad_top,
-            pad_bottom=pad_bottom,
-            mode="reflect",
-            value=0.0,
+    normalized_mode = "floor_crop" if alignment_mode == "floor_crop" else "exact_canvas_fit"
+
+    if h <= 0 or w <= 0 or target_height <= 0 or target_width <= 0:
+        raise ValueError("invalid image or target canvas dimensions")
+
+    src_ratio = float(w) / float(h)
+    dst_ratio = float(target_width) / float(target_height)
+
+    # Allow tiny floating-point differences for equal-ratio canvases.
+    if abs(src_ratio - dst_ratio) > 1e-6:
+        raise ValueError(
+            "IMAGE and LATENT aspect ratios do not match. "
+            "Please resize/crop the IMAGE upstream to match the LATENT canvas exactly."
         )
+
+    fitted = image
+    if w != target_width or h != target_height:
+        fitted = resize_bhwc(image, target_width, target_height)
+
     meta: dict[str, int | str] = {
         "original_width": target_width,
         "original_height": target_height,
         "alignment_mode": normalized_mode,
-        "pad_left": pad_left,
-        "pad_top": pad_top,
-        "pad_right": pad_right,
-        "pad_bottom": pad_bottom,
+        "pad_left": 0,
+        "pad_top": 0,
+        "pad_right": 0,
+        "pad_bottom": 0,
     }
-    return cropped, meta
+    return fitted, meta
 
 
 @dataclass(frozen=True)
@@ -1633,22 +1639,54 @@ class EgregoraRestoreOriginalSize:
 
     def restore(self, image, region_plan: RegionPlan):
         _, h, w, _ = image.shape
-        target_h = int(region_plan.original_height)
-        target_w = int(region_plan.original_width)
+        aligned_h = int(region_plan.aligned_height)
+        aligned_w = int(region_plan.aligned_width)
 
-        if h == target_h and w == target_w:
+        if aligned_h <= 0 or aligned_w <= 0:
             return (image,)
 
-        if any((region_plan.pad_left, region_plan.pad_top, region_plan.pad_right, region_plan.pad_bottom)):
-            y1 = int(region_plan.pad_top)
-            x1 = int(region_plan.pad_left)
-            y2 = y1 + target_h
-            x2 = x1 + target_w
-            if y2 <= h and x2 <= w:
-                return (image[:, y1:y2, x1:x2, :],)
+        has_padding = any(
+            int(v) > 0
+            for v in (
+                region_plan.pad_left,
+                region_plan.pad_top,
+                region_plan.pad_right,
+                region_plan.pad_bottom,
+            )
+        )
 
-        restored = resize_bhwc(image, target_w, target_h)
-        return (restored,)
+        # If there was no padding during planning, there is nothing meaningful to crop back.
+        # In that case the safest behavior is to preserve the current output resolution.
+        if not has_padding:
+            return (image,)
+
+        scale_h = h / float(aligned_h)
+        scale_w = w / float(aligned_w)
+
+        target_h = max(1, int(round(region_plan.original_height * scale_h)))
+        target_w = max(1, int(round(region_plan.original_width * scale_w)))
+
+        y1 = int(round(region_plan.pad_top * scale_h))
+        x1 = int(round(region_plan.pad_left * scale_w))
+        y2 = y1 + target_h
+        x2 = x1 + target_w
+
+        # Clamp crop bounds defensively.
+        y1 = max(0, min(y1, h))
+        x1 = max(0, min(x1, w))
+        y2 = max(y1, min(y2, h))
+        x2 = max(x1, min(x2, w))
+
+        cropped = image[:, y1:y2, x1:x2, :]
+
+        # If rounding during upscale caused a 1-2 px mismatch, normalize to the expected
+        # scaled target size while preserving the recovered framing.
+        ch = int(cropped.shape[1])
+        cw = int(cropped.shape[2])
+        if ch != target_h or cw != target_w:
+            cropped = resize_bhwc(cropped, target_w, target_h)
+
+        return (cropped,)
 
 
 NODE_CLASS_MAPPINGS = {
