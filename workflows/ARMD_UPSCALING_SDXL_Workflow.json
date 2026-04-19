@@ -1,8 +1,8 @@
 {
   "id": "75d78f3b-6bf2-4418-8b70-2d5593bf16a5",
   "revision": 0,
-  "last_node_id": 2605,
-  "last_link_id": 6751,
+  "last_node_id": 2606,
+  "last_link_id": 6754,
   "nodes": [
     {
       "id": 2582,
@@ -257,7 +257,7 @@
           "name": "IMAGE",
           "type": "IMAGE",
           "links": [
-            6750
+            6752
           ]
         }
       ],
@@ -488,79 +488,6 @@
       ]
     },
     {
-      "id": 2594,
-      "type": "EgregoraRegionPlan",
-      "pos": [
-        6554.862929507393,
-        5763.633919738991
-      ],
-      "size": [
-        270,
-        254
-      ],
-      "flags": {},
-      "order": 4,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "image",
-          "type": "IMAGE",
-          "link": 6723
-        }
-      ],
-      "outputs": [
-        {
-          "name": "aligned_image",
-          "type": "IMAGE",
-          "links": [
-            6711,
-            6729
-          ]
-        },
-        {
-          "name": "regions_batch",
-          "type": "IMAGE",
-          "links": null
-        },
-        {
-          "name": "regions_list",
-          "shape": 6,
-          "type": "IMAGE",
-          "links": [
-            6706
-          ]
-        },
-        {
-          "name": "region_plan",
-          "type": "EGREGORA_REGION_PLAN",
-          "links": [
-            6704,
-            6741
-          ]
-        },
-        {
-          "name": "region_count",
-          "type": "INT",
-          "links": null
-        },
-        {
-          "name": "region_order_text",
-          "type": "STRING",
-          "links": null
-        }
-      ],
-      "properties": {
-        "Node name for S&R": "EgregoraRegionPlan"
-      },
-      "widgets_values": [
-        1024,
-        1024,
-        64,
-        8,
-        "keep_proportion_resize"
-      ]
-    },
-    {
       "id": 2586,
       "type": "AILab_QwenVL_GGUF",
       "pos": [
@@ -693,35 +620,6 @@
       ]
     },
     {
-      "id": 2595,
-      "type": "PreviewImage",
-      "pos": [
-        7612.367029894218,
-        5240.266311524295
-      ],
-      "size": [
-        921.7927082447404,
-        1540.0330798190917
-      ],
-      "flags": {},
-      "order": 14,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "images",
-          "type": "IMAGE",
-          "link": 6750
-        }
-      ],
-      "outputs": [],
-      "properties": {
-        "cnr_id": "comfy-core",
-        "ver": "0.18.1",
-        "Node name for S&R": "PreviewImage"
-      },
-      "widgets_values": []
-    },
-    {
       "id": 2596,
       "type": "KSampler",
       "pos": [
@@ -779,6 +677,157 @@
         "lcm",
         "kl_optimal",
         0.5
+      ]
+    },
+    {
+      "id": 2595,
+      "type": "PreviewImage",
+      "pos": [
+        7612.367029894218,
+        5240.266311524295
+      ],
+      "size": [
+        921.7927082447404,
+        1540.0330798190917
+      ],
+      "flags": {},
+      "order": 15,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 6753
+        }
+      ],
+      "outputs": [],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.18.1",
+        "Node name for S&R": "PreviewImage"
+      },
+      "widgets_values": []
+    },
+    {
+      "id": 2606,
+      "type": "EgregoraRestoreOriginalSize",
+      "pos": [
+        7616.76024302639,
+        5152.466912915068
+      ],
+      "size": [
+        264.6451171875,
+        46
+      ],
+      "flags": {},
+      "order": 14,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 6752
+        },
+        {
+          "name": "region_plan",
+          "type": "EGREGORA_REGION_PLAN",
+          "link": 6754
+        }
+      ],
+      "outputs": [
+        {
+          "name": "restored_image",
+          "type": "IMAGE",
+          "links": [
+            6753
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "EgregoraRestoreOriginalSize"
+      },
+      "widgets_values": []
+    },
+    {
+      "id": 2594,
+      "type": "EgregoraRegionPlan",
+      "pos": [
+        6565.2109653194775,
+        5749.830203163157
+      ],
+      "size": [
+        270,
+        278
+      ],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image",
+          "shape": 7,
+          "type": "IMAGE",
+          "link": 6723
+        },
+        {
+          "name": "latent",
+          "shape": 7,
+          "type": "LATENT",
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "aligned_image",
+          "type": "IMAGE",
+          "links": [
+            6711,
+            6729
+          ]
+        },
+        {
+          "name": "regions_batch",
+          "type": "IMAGE",
+          "links": null
+        },
+        {
+          "name": "regions_list",
+          "shape": 6,
+          "type": "IMAGE",
+          "links": [
+            6706
+          ]
+        },
+        {
+          "name": "region_plan",
+          "type": "EGREGORA_REGION_PLAN",
+          "links": [
+            6704,
+            6741,
+            6754
+          ]
+        },
+        {
+          "name": "region_count",
+          "type": "INT",
+          "links": null
+        },
+        {
+          "name": "region_order_text",
+          "type": "STRING",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "EgregoraRegionPlan"
+      },
+      "widgets_values": [
+        1024,
+        1024,
+        384,
+        64,
+        8,
+        "pad_reflect"
       ]
     }
   ],
@@ -976,30 +1025,46 @@
       "CONDITIONING"
     ],
     [
-      6750,
-      2599,
-      0,
-      2595,
-      0,
-      "IMAGE"
-    ],
-    [
       6751,
       2597,
       0,
       2596,
       3,
       "LATENT"
+    ],
+    [
+      6752,
+      2599,
+      0,
+      2606,
+      0,
+      "IMAGE"
+    ],
+    [
+      6753,
+      2606,
+      0,
+      2595,
+      0,
+      "IMAGE"
+    ],
+    [
+      6754,
+      2594,
+      3,
+      2606,
+      1,
+      "EGREGORA_REGION_PLAN"
     ]
   ],
   "groups": [],
   "config": {},
   "extra": {
     "ds": {
-      "scale": 0.5730855330116972,
+      "scale": 0.5730855330116986,
       "offset": [
-        -5574.084575401008,
-        -4880.896479133682
+        -5408.57537236076,
+        -4961.444312910331
       ]
     },
     "frontendVersion": "1.41.21",
