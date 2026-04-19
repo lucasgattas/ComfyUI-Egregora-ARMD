@@ -1,0 +1,671 @@
+{
+  "id": "75d78f3b-6bf2-4418-8b70-2d5593bf16a5",
+  "revision": 0,
+  "last_node_id": 2608,
+  "last_link_id": 6760,
+  "nodes": [
+    {
+      "id": 2599,
+      "type": "VAEDecodeTiled",
+      "pos": [
+        7275.032394931539,
+        5896.234681741273
+      ],
+      "size": [
+        269.05062541604093,
+        150
+      ],
+      "flags": {},
+      "order": 7,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "samples",
+          "type": "LATENT",
+          "link": 6732
+        },
+        {
+          "name": "vae",
+          "type": "VAE",
+          "link": 6733
+        }
+      ],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            6752
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.18.1",
+        "Node name for S&R": "VAEDecodeTiled"
+      },
+      "widgets_values": [
+        768,
+        64,
+        64,
+        8
+      ]
+    },
+    {
+      "id": 2605,
+      "type": "EgregoraAdaptiveDiffusionApply",
+      "pos": [
+        6902.50939928372,
+        5958.068357785933
+      ],
+      "size": [
+        290.7447265625,
+        162
+      ],
+      "flags": {},
+      "order": 5,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 6740
+        },
+        {
+          "name": "region_plan",
+          "type": "EGREGORA_REGION_PLAN",
+          "link": 6741
+        },
+        {
+          "name": "regional_positive",
+          "type": "EGREGORA_REGIONAL_CONDITIONING",
+          "link": 6742
+        },
+        {
+          "name": "regional_negative",
+          "type": "EGREGORA_REGIONAL_CONDITIONING",
+          "link": 6743
+        },
+        {
+          "name": "runtime_payload_adapter",
+          "shape": 7,
+          "type": "EGREGORA_RUNTIME_PAYLOAD_ADAPTER",
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "links": [
+            6744
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "EgregoraAdaptiveDiffusionApply"
+      },
+      "widgets_values": [
+        4,
+        true
+      ]
+    },
+    {
+      "id": 2595,
+      "type": "PreviewImage",
+      "pos": [
+        7612.367029894218,
+        5240.266311524295
+      ],
+      "size": [
+        921.7927082447404,
+        1540.0330798190917
+      ],
+      "flags": {},
+      "order": 9,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 6753
+        }
+      ],
+      "outputs": [],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.18.1",
+        "Node name for S&R": "PreviewImage"
+      },
+      "widgets_values": []
+    },
+    {
+      "id": 2606,
+      "type": "EgregoraRestoreOriginalSize",
+      "pos": [
+        7616.76024302639,
+        5152.466912915068
+      ],
+      "size": [
+        264.6451171875,
+        46
+      ],
+      "flags": {},
+      "order": 8,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 6752
+        },
+        {
+          "name": "region_plan",
+          "type": "EGREGORA_REGION_PLAN",
+          "link": 6754
+        }
+      ],
+      "outputs": [
+        {
+          "name": "restored_image",
+          "type": "IMAGE",
+          "links": [
+            6753
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "EgregoraRestoreOriginalSize"
+      },
+      "widgets_values": []
+    },
+    {
+      "id": 2607,
+      "type": "EmptyLatentImage",
+      "pos": [
+        6291.663945216606,
+        5936.438010272625
+      ],
+      "size": [
+        270,
+        106
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "LATENT",
+          "type": "LATENT",
+          "links": [
+            6755,
+            6757
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.18.1",
+        "Node name for S&R": "EmptyLatentImage"
+      },
+      "widgets_values": [
+        3072,
+        3072,
+        1
+      ]
+    },
+    {
+      "id": 2581,
+      "type": "CheckpointLoaderSimple",
+      "pos": [
+        6904.054021348957,
+        6161.455713994769
+      ],
+      "size": [
+        281.81482429117113,
+        98
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "MODEL",
+          "type": "MODEL",
+          "links": [
+            6740
+          ]
+        },
+        {
+          "name": "CLIP",
+          "type": "CLIP",
+          "links": [
+            6703
+          ]
+        },
+        {
+          "name": "VAE",
+          "type": "VAE",
+          "links": [
+            6733
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.18.1",
+        "Node name for S&R": "CheckpointLoaderSimple"
+      },
+      "widgets_values": [
+        "gonzalomoXLFluxPony_v60PhotoXLDMD.safetensors"
+      ]
+    },
+    {
+      "id": 2608,
+      "type": "Primitive string multiline [Crystools]",
+      "pos": [
+        6903.622476308491,
+        5754.219571822711
+      ],
+      "size": [
+        284.6346303250093,
+        153.0558477284667
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "string",
+          "type": "STRING",
+          "links": [
+            6756
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfyui-crystools",
+        "ver": "1.27.4",
+        "Node name for S&R": "Primitive string multiline [Crystools]"
+      },
+      "widgets_values": [
+        "the sky\nthe sky with clouds\nthe sun in the sky with clouds\na beautiful mansion house\na beautiful garden\na beautiful forest\ngrass and some flowers and plants\na nice white ferrari on a grassy field\na pile of wood in a grassy field"
+      ]
+    },
+    {
+      "id": 2583,
+      "type": "EgregoraRegionalConditioning",
+      "pos": [
+        7275.699730923711,
+        5622.967306170627
+      ],
+      "size": [
+        271.8501953125,
+        222
+      ],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "link": 6703
+        },
+        {
+          "name": "region_plan",
+          "type": "EGREGORA_REGION_PLAN",
+          "link": 6704
+        },
+        {
+          "name": "positive_prompts",
+          "type": "STRING",
+          "widget": {
+            "name": "positive_prompts"
+          },
+          "link": 6756
+        }
+      ],
+      "outputs": [
+        {
+          "name": "regional_positive",
+          "type": "EGREGORA_REGIONAL_CONDITIONING",
+          "links": [
+            6742
+          ]
+        },
+        {
+          "name": "regional_negative",
+          "type": "EGREGORA_REGIONAL_CONDITIONING",
+          "links": [
+            6743
+          ]
+        },
+        {
+          "name": "placeholder_positive",
+          "type": "CONDITIONING",
+          "links": [
+            6758
+          ]
+        },
+        {
+          "name": "placeholder_negative",
+          "type": "CONDITIONING",
+          "links": [
+            6759
+          ]
+        },
+        {
+          "name": "prompt_count",
+          "type": "INT",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "EgregoraRegionalConditioning"
+      },
+      "widgets_values": [
+        "",
+        ""
+      ]
+    },
+    {
+      "id": 2594,
+      "type": "EgregoraRegionPlan",
+      "pos": [
+        6598.453813100328,
+        5871.720645026274
+      ],
+      "size": [
+        270,
+        278
+      ],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image",
+          "shape": 7,
+          "type": "IMAGE",
+          "link": null
+        },
+        {
+          "name": "latent",
+          "shape": 7,
+          "type": "LATENT",
+          "link": 6755
+        }
+      ],
+      "outputs": [
+        {
+          "name": "aligned_image",
+          "type": "IMAGE",
+          "links": []
+        },
+        {
+          "name": "regions_batch",
+          "type": "IMAGE",
+          "links": null
+        },
+        {
+          "name": "regions_list",
+          "shape": 6,
+          "type": "IMAGE",
+          "links": []
+        },
+        {
+          "name": "region_plan",
+          "type": "EGREGORA_REGION_PLAN",
+          "links": [
+            6704,
+            6741,
+            6754
+          ]
+        },
+        {
+          "name": "region_count",
+          "type": "INT",
+          "links": null
+        },
+        {
+          "name": "region_order_text",
+          "type": "STRING",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "EgregoraRegionPlan"
+      },
+      "widgets_values": [
+        1024,
+        1024,
+        384,
+        64,
+        8,
+        "pad_reflect"
+      ]
+    },
+    {
+      "id": 2596,
+      "type": "KSampler",
+      "pos": [
+        7274.125489527798,
+        6085.343926165093
+      ],
+      "size": [
+        270,
+        262
+      ],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 6744
+        },
+        {
+          "name": "positive",
+          "type": "CONDITIONING",
+          "link": 6758
+        },
+        {
+          "name": "negative",
+          "type": "CONDITIONING",
+          "link": 6759
+        },
+        {
+          "name": "latent_image",
+          "type": "LATENT",
+          "link": 6757
+        }
+      ],
+      "outputs": [
+        {
+          "name": "LATENT",
+          "type": "LATENT",
+          "links": [
+            6732
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.18.1",
+        "Node name for S&R": "KSampler"
+      },
+      "widgets_values": [
+        111,
+        "fixed",
+        7,
+        1,
+        "lcm",
+        "kl_optimal",
+        1
+      ]
+    }
+  ],
+  "links": [
+    [
+      6703,
+      2581,
+      1,
+      2583,
+      0,
+      "CLIP"
+    ],
+    [
+      6704,
+      2594,
+      3,
+      2583,
+      1,
+      "EGREGORA_REGION_PLAN"
+    ],
+    [
+      6732,
+      2596,
+      0,
+      2599,
+      0,
+      "LATENT"
+    ],
+    [
+      6733,
+      2581,
+      2,
+      2599,
+      1,
+      "VAE"
+    ],
+    [
+      6740,
+      2581,
+      0,
+      2605,
+      0,
+      "MODEL"
+    ],
+    [
+      6741,
+      2594,
+      3,
+      2605,
+      1,
+      "EGREGORA_REGION_PLAN"
+    ],
+    [
+      6742,
+      2583,
+      0,
+      2605,
+      2,
+      "EGREGORA_REGIONAL_CONDITIONING"
+    ],
+    [
+      6743,
+      2583,
+      1,
+      2605,
+      3,
+      "EGREGORA_REGIONAL_CONDITIONING"
+    ],
+    [
+      6744,
+      2605,
+      0,
+      2596,
+      0,
+      "MODEL"
+    ],
+    [
+      6752,
+      2599,
+      0,
+      2606,
+      0,
+      "IMAGE"
+    ],
+    [
+      6753,
+      2606,
+      0,
+      2595,
+      0,
+      "IMAGE"
+    ],
+    [
+      6754,
+      2594,
+      3,
+      2606,
+      1,
+      "EGREGORA_REGION_PLAN"
+    ],
+    [
+      6755,
+      2607,
+      0,
+      2594,
+      1,
+      "LATENT"
+    ],
+    [
+      6756,
+      2608,
+      0,
+      2583,
+      2,
+      "STRING"
+    ],
+    [
+      6757,
+      2607,
+      0,
+      2596,
+      3,
+      "LATENT"
+    ],
+    [
+      6758,
+      2583,
+      2,
+      2596,
+      1,
+      "CONDITIONING"
+    ],
+    [
+      6759,
+      2583,
+      3,
+      2596,
+      2,
+      "CONDITIONING"
+    ]
+  ],
+  "groups": [],
+  "config": {},
+  "extra": {
+    "ds": {
+      "scale": 0.5209868481924553,
+      "offset": [
+        -5370.102380131352,
+        -4982.904502504055
+      ]
+    },
+    "frontendVersion": "1.41.21",
+    "workflowRendererVersion": "LG",
+    "ue_links": [],
+    "VHS_latentpreview": false,
+    "VHS_latentpreviewrate": 0,
+    "VHS_MetadataImage": true,
+    "VHS_KeepIntermediate": true,
+    "links_added_by_ue": []
+  },
+  "version": 0.4
+}
