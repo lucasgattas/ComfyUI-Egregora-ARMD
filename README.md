@@ -2,98 +2,103 @@
 
 **ARMD** stands for **Adaptive Regional Mixture of Diffusers**.
 
-Egregora ARMD is a regional diffusion workflow for **semantic upscaling**, **multi-prompt image generation**, and **adaptive regional reconstruction** in ComfyUI. It is especially useful when you want the continuity benefits of shared-canvas denoising together with **different prompts for different image regions**.
+Egregora ARMD is a regional diffusion workflow for **semantic upscaling**, **multi-prompt image generation**, and **adaptive regional reconstruction** in ComfyUI.
 
-Instead of treating each tile as an isolated img2img job, ARMD applies regional conditioning over a shared latent canvas. This makes it much more suitable for creative upscaling, where the goal is not only to sharpen textures, but also to create or improve **local structures** without producing obvious seams, conflicting forms, or tile-by-tile color drift.
+It is designed around a simple idea: keep the benefits of **shared-canvas denoising**, but give different regions of the image **different prompts** without letting those prompts fight over the same space.
+
+Instead of treating each tile as a fully independent img2img job, ARMD uses:
+
+- **core regions** for local semantic ownership
+- **context regions** so neighboring areas can still inform each other
+- **feathered write-back** to reduce seams during recombination
+
+This makes it especially useful for creative upscaling, regional prompting, and structured scene generation.
 
 ---
 
 ## ✨ What this node pack is for
 
-ARMD is designed for workflows where a single global prompt is not enough.
+ARMD is meant for workflows where a single global prompt is not enough.
 
-Typical use cases include:
+Typical use cases:
 
-- **Creative upscaling** of existing images with region-specific prompts
+- **Creative upscaling** of existing images with per-region prompts
 - **Regional prompt automation** using captioners / VLMs
-- **Manual per-region prompting** for local control
-- **Shared-canvas denoising** with stronger inter-tile coherence than independent tiled img2img
-- **Blank-canvas multi-prompt generation** using a region plan and denoise `1.0`
+- **Manual per-region prompting**
+- **Shared-canvas denoising** with better local coherence than independent tiled img2img
+- **Blank-canvas multi-prompt generation** using an Empty Latent or aligned base image
 
-This is especially useful for:
+This is useful when you want to create or improve:
 
-- old AI images that need a more intelligent upscale
-- artworks that benefit from local reinterpretation
-- scenes with multiple semantic zones
-- compositions where each tile should “know” what it is supposed to become
+- skies, clouds, sun, mountains, forests, gardens, buildings, vehicles, subjects, or objects in different parts of the same image
+- scenes that need different semantic instructions across the frame
+- outputs that should remain coherent without strong tile-by-tile disagreement
 
 ---
 
 ## 🧠 Core idea behind ARMD
 
-Many tiled upscaling workflows split an image into tiles, run each tile separately, and recombine the results. That can work for low creativity settings, but once the model starts changing local structure, tiles often stop agreeing with each other.
+Many tiled workflows improve memory usage and resolution, but they often fail when different tiles start inventing structure independently.
 
-That usually leads to:
+That usually creates:
 
 - visible seams
-- mismatched local structures
-- different color decisions across neighboring tiles
-- objects or patterns that do not align at recombination boundaries
+- ghosting
+- inconsistent structures across tile boundaries
+- tile-by-tile color drift
+- conflicting semantic decisions in overlap zones
 
-ARMD takes a different route.
+ARMD addresses this by separating **context** from **ownership**.
 
-It uses a **shared-canvas regional denoising strategy** inspired by Mixture of Diffusers style workflows, while replacing prompt uniformity with **regional conditioning**.
+Each region has:
 
-The result is a workflow where:
+- a **core region**: the area that actually belongs to that prompt
+- a **context region**: an expanded area that gives surrounding information to the model
+- a **write-back region** with feathering: so the tile can blend back into the canvas smoothly without taking full control of neighboring semantic zones
 
-- neighboring regions communicate better during denoising
-- each region can receive its own prompt
-- captioners can automate regional prompt creation
-- ControlNet can be added as an optional structural guide
-- the output is better suited for **creative** upscaling rather than simple restoration
+This makes ARMD much more suitable for **creative** diffusion workflows than naive tiled recombination.
 
 ---
 
-## ✅ Why this can work better than independent tiled img2img
+## ✅ Why this works better than independent tile generation
 
 ARMD is not just “tile upscaling with prompts”.
 
-The difference is where the main bottleneck is addressed.
-
 In classic tiled img2img:
 
-- each tile invents structure largely on its own
-- recombination happens afterward
-- even with overlap and seam reduction tricks, tiles may still disagree structurally
-- color drift across tiles is common, especially in backgrounds
+- tiles are often generated too independently
+- overlap zones may receive different structures from different prompts
+- recombination tries to blend incompatible hypotheses
+- ghosting and seams appear when prompts diverge too much
 
 In ARMD:
 
-- denoising is performed with a regional shared-canvas logic
-- tile boundaries are blended through weighted accumulation
-- prompts are assigned region by region
-- the workflow is better able to maintain coherence while still allowing creative structural change
+- prompts stay tied to **local core regions**
+- tiles still see more context through expanded context crops
+- write-back is feathered rather than fully competitive
+- neighboring tiles can remain aware of each other without mixing prompt ownership too aggressively
 
-This is why ARMD is particularly valuable at **higher denoise values**.
+That balance is what makes ARMD effective both for:
 
-Low denoise tiled workflows can already look acceptable in many cases because the model is not changing enough structure to expose their weaknesses. ARMD becomes most useful when you want to unlock a higher level of reinterpretation, detail invention, and local structural enhancement.
+- **upscaling from a source image**
+- **generation from scratch**
 
 ---
 
 ## 🧩 Included nodes
 
 ### 🧭 Egregora Region Plan
-Builds the regional layout used by ARMD.
+Builds the spatial layout used by ARMD.
 
 It:
-- aligns the image to a diffusion-friendly working size
-- divides the image into regions
-- outputs the aligned image
-- outputs the list of region crops
-- outputs the region plan metadata
-- outputs a region order text reference
+- aligns the working canvas
+- divides the image into **core regions**
+- expands them into **context regions**
+- prepares batching metadata
+- outputs region order text for prompt assignment
+- optionally works from an **IMAGE**, a **LATENT**, or both
 
-This node is the backbone of the whole workflow.
+This node is the backbone of the workflow.
 
 ### 🧠 Egregora Regional Conditioning
 Encodes one prompt per region.
@@ -104,7 +109,7 @@ It creates:
 - placeholder positive conditioning
 - placeholder negative conditioning
 
-These placeholders are useful when another node expects a standard conditioning object even though the real conditioning logic is handled regionally.
+These placeholders are useful for compatibility with nodes that still expect standard conditioning objects.
 
 ### 🌐 Egregora Adaptive Diffusion Apply
 Applies ARMD to a model.
@@ -113,27 +118,24 @@ This is the main node that patches the model so regional conditioning can be use
 
 It:
 - reads the region plan
-- reads the per-region conditioning
-- builds regional batches
-- runs weighted shared-canvas accumulation
-- optionally accepts runtime payload adapters
+- reads per-region conditioning
+- builds regional runtime batches
+- uses context regions for reading
+- writes back using feathered local ownership
 
 ### 🔎 Egregora Region Select
-Lets you preview or inspect a single planned region.
-
-Useful for:
-- debugging
+Lets you inspect a single region for:
 - manual prompt writing
 - captioning workflows
-- checking region order
+- debugging region order
 
 ### 🧩 Egregora Spatial Tensor Pack
 Packs spatial tensors into a runtime payload adapter.
 
-Useful for advanced workflows that want to pass extra spatial inputs during runtime.
+Useful for advanced workflows that pass extra runtime tensors.
 
 ### 📦 Egregora Static Payload Pack
-Packs static values into a runtime payload adapter.
+Packs static runtime values into a runtime payload adapter.
 
 ### 🔗 Egregora Runtime Adapter Merge
 Merges multiple runtime payload adapters.
@@ -141,29 +143,58 @@ Merges multiple runtime payload adapters.
 ### 📐 Egregora Restore Original Size
 Restores the final image back to the original framing after `pad_reflect` alignment.
 
-This is important because ARMD may internally pad the image to make the latent canvas compatible with region planning, but you usually still want the final image in the original size and framing.
+This is useful because ARMD may internally pad the image to a safer working canvas, while you still want the final output to match the original framing.
 
 ---
 
 ## 🖼️ Alignment modes
 
-ARMD intentionally keeps alignment simple.
+ARMD keeps alignment intentionally simple.
 
 ### `pad_reflect` ✅ recommended
 This is the default and recommended mode.
 
 It:
-- preserves the original image content
+- preserves the original framing better
 - avoids deformation
-- avoids cropping away image content
-- pads only where needed so the image can be processed safely
+- avoids discarding image content
+- pads only where necessary
 
-This is the best general-purpose option for most users.
+This is the safest general-purpose option.
 
 ### `floor_crop`
 This crops the image down to the nearest compatible size.
 
 Use it only if you explicitly prefer cropping over padding.
+
+---
+
+## 📏 Region planning and defaults
+
+ARMD now works best with a **core + context + feather** strategy.
+
+Recommended starting values:
+
+- `region_width = 1024`
+- `region_height = 1024`
+- `region_overlap = 384`
+- `blend_feather = 64`
+
+How to think about them:
+
+- **region_width / region_height** define the region scale
+- **region_overlap** acts as **context padding**
+- **blend_feather** controls the soft transition on write-back
+
+Practical rule of thumb:
+
+- context overlap around **1/3 to 3/8** of tile size
+- feather around **1/16 to 1/8** of tile size
+
+Examples:
+- for `1024` tiles → `384 / 64`
+- for `768` tiles → `256 / 48` or `256 / 64`
+- for `512` tiles → `192 / 32` or `192 / 48`
 
 ---
 
@@ -180,19 +211,24 @@ That means:
 Example:
 
 ```text
-prompt for region 1
-prompt for region 2
-prompt for region 3
-prompt for region 4
+the sky
+the sky
+the sun
+a beautiful mansion house
+a beautiful garden
+a beautiful forest
+grass and flowers
+a nice white ferrari on a grassy field
+grass
 ```
 
-If your region plan has 4 regions, you must provide 4 positive prompt lines.
+If your region plan produces 9 regions, you must provide 9 positive prompt lines.
 
 ### Negative prompts
 Negative prompts can be used in three ways:
 
-- leave empty → ARMD will use empty negatives for all regions
-- provide **one** negative line → that single negative will be reused for all regions
+- leave empty → ARMD uses empty negatives for all regions
+- provide **one** negative line → it is reused for all regions
 - provide one negative line per region
 
 ---
@@ -202,20 +238,22 @@ Negative prompts can be used in three ways:
 Captioners are **optional**.
 
 ARMD works with:
-- fully manual prompts
-- prompts generated by external captioners
-- VLM-based region descriptions
-- hybrid workflows where you edit VLM outputs before encoding
+- manual prompts
+- external captioners
+- VLM-based regional descriptions
+- hybrid workflows where VLM output is edited manually before encoding
 
 If your captioner outputs **one caption per line**, it can usually connect directly to **Egregora Regional Conditioning**.
 
-If it outputs one long block of text instead, you must first reformat that text into **newline-separated prompts**.
+If it outputs one large paragraph or one single string, reformat it into newline-separated prompts first.
 
-In practice, ARMD works especially well with region-first captioning workflows:
-1. split image into regions
-2. caption each region
-3. send the newline-separated result to Regional Conditioning
-4. run ARMD
+A typical regional caption workflow is:
+
+1. build a region plan
+2. inspect or batch the regions
+3. caption each region
+4. send the newline-separated captions to Regional Conditioning
+5. run ARMD
 
 ---
 
@@ -224,48 +262,50 @@ In practice, ARMD works especially well with region-first captioning workflows:
 ControlNet is **optional**, but often useful.
 
 It can help preserve:
-- structure
 - composition
-- edges
+- edge structure
+- subject pose
 - depth logic
-- local guidance from the source image
+- local geometry from a source image
 
-Examples of useful structural controls include:
-- tile-based ControlNet
+Examples of useful controls:
+- tile
 - canny
 - depth
-- line / edge based preprocessors
+- other structural preprocessors
 
-Important note:
-ControlNet is not a replacement for regional prompting.
+Important:
+ControlNet does **not** replace regional prompting.
 
-A global prompt plus ControlNet can still produce local hallucinations. ARMD is strongest when ControlNet is used as **structural support**, while regional prompts define what each part of the image should become.
+A global prompt plus ControlNet can still produce local hallucinations. ARMD works best when:
 
-In many workflows:
-- **ARMD without ControlNet** is already better than global-prompt MoD-style upscale
-- **ARMD with ControlNet** is even better when the base image structure matters
+- regional prompts define what each zone should become
+- ControlNet acts as structural support
+
+In many cases:
+- **ARMD without ControlNet** is already stronger than a global-prompt tiled workflow
+- **ARMD with ControlNet** is stronger still when source structure matters
 
 ---
 
 ## 🔍 What “creative upscaling” means here
 
-Creative upscaling is not just about generating sharper textures.
+Creative upscaling is not only about adding texture.
 
-In this project, it means allowing the model to improve or reinterpret **local structures** in the image, such as:
+In ARMD, it means allowing the model to improve or reinterpret **local structures**, such as:
 
-- clothing forms
-- objects
-- architectural details
-- background elements
-- texture transitions that imply new structure
-- shape refinement at meaningful semantic locations
+- clouds, sun, sky transitions
+- buildings and architectural details
+- gardens, vegetation, terrain
+- vehicles and objects
+- semantic transitions between neighboring regions
 
-This is why ARMD becomes much more valuable at medium and high denoise values.
+This is why ARMD becomes especially valuable beyond very low denoise values.
 
-At very low denoise, many tiled methods can look acceptable because they barely change the image.  
-At higher denoise, their weaknesses become obvious.
+At low denoise, many tiled workflows can appear acceptable because they are not changing enough to expose their weaknesses.  
+At higher denoise, independent or poorly coordinated tiles tend to break down much more easily.
 
-ARMD is designed for the stage where you want:
+ARMD is aimed at the point where you want:
 - more detail
 - more structure
 - more semantic control
@@ -280,6 +320,7 @@ This is the main use case.
 
 Typical logic:
 - load image
+- optionally resize to a working target
 - create region plan
 - generate prompts manually or with a captioner
 - optionally apply ControlNet
@@ -291,75 +332,80 @@ For this mode, denoise is usually **below 1.0**, depending on how much reinterpr
 ### 2. Blank-canvas regional generation
 ARMD can also be used for multi-prompt image generation from scratch.
 
-In this case:
-- use a blank or minimal base image to define aspect ratio and spatial layout
-- create a region plan
-- assign prompts region by region
-- run with **denoise = 1.0**
+This now works best by using:
+- an **Empty Latent** to define canvas resolution
+- optionally a base/noise image for canvas guidance if desired
+- a region plan aligned to that latent canvas
+- one prompt per region
 
-This turns ARMD into a practical shared-canvas multi-prompt composition workflow.
+For true from-scratch generation, use:
+
+- **denoise = 1.0**
+- a latent-driven canvas
+- regional prompts assigned line by line
+
+---
+
+## 🧱 IMAGE and LATENT input support in Region Plan
+
+`Egregora Region Plan` can now work with:
+
+- **IMAGE only**
+- **LATENT only**
+- **IMAGE + LATENT**
+
+Why this matters:
+
+- for **upscaling**, IMAGE-only is often enough
+- for **generation from scratch**, LATENT is often the best source of truth for canvas size
+- for mixed workflows, IMAGE + LATENT helps keep resolution synchronized between visual reference and diffusion canvas
+
+If a LATENT is provided, ARMD can use it to define the exact working resolution even when there is no strong source image.
 
 ---
 
 ## 🔧 Recommended starting workflow
 
-A simple starting pipeline is:
-
+### Upscaling workflow
 1. **Load image**
-2. **Resize to target working size**
+2. optionally resize to working target
 3. **Egregora Region Plan**
-4. **Caption each region** or write prompts manually
+4. caption each region or write prompts manually
+5. **Egregora Regional Conditioning**
+6. optionally add **ControlNet**
+7. **Egregora Adaptive Diffusion Apply**
+8. **KSampler**
+9. **VAE Decode Tiled**
+10. **Egregora Restore Original Size**
+
+### From-scratch generation workflow
+1. **Empty Latent Image**
+2. optionally create or pass a base/noise image
+3. **Egregora Region Plan**
+4. prepare one prompt per region
 5. **Egregora Regional Conditioning**
 6. **Egregora Adaptive Diffusion Apply**
-7. **KSampler**
+7. **KSampler** with `denoise = 1.0`
 8. **VAE Decode Tiled**
-9. **Egregora Restore Original Size**
-
-Optional additions:
-- ControlNet
-- color consistency tools
-- runtime payload adapters
-- caption cleanup / manual prompt edits
 
 ---
 
 ## 📌 Notes on tiled VAE encode / decode
 
-Tiled VAE encode and decode are complementary tools in ARMD workflows.
+Tiled VAE encode and decode remain complementary tools in ARMD workflows.
 
-They are useful because they:
-- help process large images safely
+They help:
+- process large images safely
 - reduce memory pressure
-- keep VAE conversion more practical at higher resolutions
+- keep VAE conversion practical at higher resolutions
 
 But tiled VAE alone does **not** solve the semantic coordination problem between regions.
 
-ARMD addresses that missing piece by adding region-aware conditioning on top of a shared-canvas denoising strategy.
-
----
-
-## 🛠️ Related practical tools
-
-ARMD was developed in the context of practical experimentation with tiled creative upscaling workflows.
-
-Related tools worth knowing include:
-
-- **[ComfyUI-Egregora-Divide-And-Enhance](https://github.com/lucasgattas/ComfyUI-Egregora-Divide-And-Enhance)**  
-  An earlier approach for tiled creative upscaling with prompt lists and per-tile prompting, but still based on separate img2img-style tile generation and recombination.
-
-- **[ComfyUI-Egregora-Adaptive-Colorfix](https://github.com/lucasgattas/ComfyUI-Egregora-Adaptive-Colorfix)**  
-  A previous attempt to improve per-tile color consistency before recombination.
-
-- **[comfyui-colorfix-v3](https://github.com/ihorpankin/comfyui-colorfix-v3)**  
-  Useful especially for models that tend to reinterpret global palette and contrast more aggressively.
-
-- **[ComfyUI_UltimateSDUpscaleGuider](https://github.com/Blakeem/ComfyUI_UltimateSDUpscaleGuider)**  
-  Adds improvements to Ultimate SD Upscale style workflows, including context-oriented overlap strategies.
-
-These tools are relevant because ARMD is best understood not as a rejection of prior tiled practice, but as a refinement of where the real bottleneck lies.
-
-Once seam blending is improved, the next major problem is no longer only border visibility.  
-It becomes the question of how neighboring regions can invent the **right structure together**.
+ARMD addresses that by combining:
+- region planning
+- regional conditioning
+- context-aware denoising
+- controlled write-back
 
 ---
 
@@ -372,7 +418,7 @@ Important references include:
 - Mixture of Diffusers
 - DemoFusion
 - SpotDiffusion
-- region-captioning and regional super-resolution papers such as C-Upscale and RAGSR
+- regional captioning and regional super-resolution work such as C-Upscale and RAGSR
 
 ARMD does **not** claim to invent all of these ideas from scratch.
 
@@ -384,30 +430,8 @@ Its purpose is to make this kind of regional conditioning workflow **usable in p
 
 ---
 
-## ✅ Current status
-
-ARMD is already usable for practical experimentation.
-
-It has been tested primarily with:
-- **SDXL**
-- **Z-Image Turbo**
-
-Other backbones may work too, but behavior can differ depending on:
-- model architecture
-- color reinterpretation strength
-- ControlNet compatibility
-- denoise range
-
----
-
 ## 💛 Acknowledgements
 
 This project was developed through practical experimentation inside the wider ComfyUI ecosystem.
 
 Thanks to the open-source diffusion community for building the tools, workflows, discussions, and research foundations that make this kind of work possible.
-
----
-
-## 🔗 Repository
-
-**GitHub:** [lucasgattas/ComfyUI-Egregora-ARMD](https://github.com/lucasgattas/ComfyUI-Egregora-ARMD)
