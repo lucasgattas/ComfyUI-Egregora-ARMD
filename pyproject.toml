@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "comfyUI-egregora-armd"
+version = "0.1.0"
+description = "🌐 ARMD (Adaptive Regional Mixture of Diffusers) is a region-based diffusion system for ComfyUI, designed for semantic upscaling with per-region conditioning, optional VLM captioning, and adaptive regional reconstruction."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [
+  { name = "Lucas Gattas" }
+]
+dependencies = [
+  "numpy",
+  "opencv-python",
+  "PyWavelets",
+  "torch"
+]
+
+[project.urls]
+Repository = "https://github.com/lucasgattas/ComfyUI-Egregora-ARMD"
+Documentation = "https://github.com/lucasgattas/ComfyUI-Egregora-ARMD#readme"
+"Bug Tracker" = "https://github.com/lucasgattas/ComfyUI-Egregora-ARMD/issues"
+
+[tool.comfy]
+PublisherId = "mrgattax"
+DisplayName = "ComfyUI-Egregora-ARMD"
+Icon = "🌐"
+includes = []
