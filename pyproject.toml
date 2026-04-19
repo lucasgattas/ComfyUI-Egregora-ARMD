@@ -27,5 +27,5 @@ Documentation = "https://github.com/lucasgattas/ComfyUI-Egregora-ARMD#readme"
 [tool.comfy]
 PublisherId = "mrgattax"
 DisplayName = "ComfyUI-Egregora-ARMD"
-Icon = "🌐"
+Icon = ""
 includes = []
