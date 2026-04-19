@@ -14,7 +14,7 @@ from comfy.utils import repeat_to_batch_size
 # version
 # ============================================================
 
-__version__ = "0.1.4"
+__version__ = "0.2.2"
 
 
 # ============================================================
@@ -71,6 +71,24 @@ def axis_positions(full_size: int, tile_size: int, overlap: int) -> list[int]:
     return positions
 
 
+
+def split_bounds(full_size: int, target_size: int) -> list[int]:
+    if full_size <= 0:
+        raise ValueError("full_size must be positive")
+    if target_size <= 0:
+        raise ValueError("target_size must be positive")
+    count = max(1, ceildiv(full_size, target_size))
+    return [int(round((i * full_size) / count)) for i in range(count + 1)]
+
+
+def expand_bbox_clamped(bbox: RegionBBox, pad_x: int, pad_y: int, full_w: int, full_h: int) -> RegionBBox:
+    x1 = max(0, bbox.x - pad_x)
+    y1 = max(0, bbox.y - pad_y)
+    x2 = min(full_w, bbox.x2 + pad_x)
+    y2 = min(full_h, bbox.y2 + pad_y)
+    return RegionBBox(x=x1, y=y1, w=max(1, x2 - x1), h=max(1, y2 - y1))
+
+
 # ============================================================
 # region planning
 # ============================================================
@@ -95,6 +113,7 @@ class RegionBBox:
         return [self.x, self.y, self.x2, self.y2]
 
 
+
 @dataclass(frozen=True)
 class RegionPlan:
     original_width: int
@@ -115,10 +134,16 @@ class RegionPlan:
     region_width_latent: int
     region_height_latent: int
     region_overlap_latent: int
+    blend_feather: int
+    blend_feather_latent: int
     rows: int
     cols: int
     bboxes_latent: list[RegionBBox]
     bboxes_pixel: list[RegionBBox]
+    core_bboxes_latent: list[RegionBBox]
+    core_bboxes_pixel: list[RegionBBox]
+    write_bboxes_latent: list[RegionBBox]
+    write_bboxes_pixel: list[RegionBBox]
 
     @property
     def region_count(self) -> int:
@@ -253,6 +278,7 @@ def align_image_to_compression(
     return aligned, meta
 
 
+
 def build_region_plan(
     aligned_width: int,
     aligned_height: int,
@@ -261,6 +287,7 @@ def build_region_plan(
     region_overlap: int,
     compression: int,
     *,
+    blend_feather: int = 64,
     original_width: int | None = None,
     original_height: int | None = None,
     alignment_mode: str = "unknown",
@@ -275,39 +302,70 @@ def build_region_plan(
         raise ValueError("region_height must be divisible by compression")
     if region_overlap % compression != 0:
         raise ValueError("region_overlap must be divisible by compression")
+    if blend_feather % compression != 0:
+        raise ValueError("blend_feather must be divisible by compression")
 
     latent_width = aligned_width // compression
     latent_height = aligned_height // compression
 
-    rw_l_raw = region_width // compression
-    rh_l_raw = region_height // compression
-    ro_l_raw = region_overlap // compression
+    rw_l_target = min(max(1, region_width // compression), latent_width)
+    rh_l_target = min(max(1, region_height // compression), latent_height)
+    context_pad_l = max(0, region_overlap // compression)
+    blend_feather_l = max(0, blend_feather // compression)
 
-    rw_l = min(rw_l_raw, latent_width)
-    rh_l = min(rh_l_raw, latent_height)
-    ro_l = min(ro_l_raw, max(0, rw_l - 1), max(0, rh_l - 1))
+    effective_region_width = rw_l_target * compression
+    effective_region_height = rh_l_target * compression
+    effective_region_overlap = context_pad_l * compression
+    effective_blend_feather = blend_feather_l * compression
 
-    effective_region_width = rw_l * compression
-    effective_region_height = rh_l * compression
-    effective_region_overlap = ro_l * compression
-
-    xs = axis_positions(latent_width, rw_l, ro_l)
-    ys = axis_positions(latent_height, rh_l, ro_l)
+    x_bounds = split_bounds(latent_width, rw_l_target)
+    y_bounds = split_bounds(latent_height, rh_l_target)
+    cols = len(x_bounds) - 1
+    rows = len(y_bounds) - 1
 
     bboxes_latent: list[RegionBBox] = []
     bboxes_pixel: list[RegionBBox] = []
+    core_bboxes_latent: list[RegionBBox] = []
+    core_bboxes_pixel: list[RegionBBox] = []
+    write_bboxes_latent: list[RegionBBox] = []
+    write_bboxes_pixel: list[RegionBBox] = []
 
-    for y in ys:
-        for x in xs:
-            lat = RegionBBox(x=x, y=y, w=rw_l, h=rh_l)
-            pix = RegionBBox(
-                x=x * compression,
-                y=y * compression,
-                w=effective_region_width,
-                h=effective_region_height,
+    for row in range(rows):
+        for col in range(cols):
+            core_lat = RegionBBox(
+                x=x_bounds[col],
+                y=y_bounds[row],
+                w=max(1, x_bounds[col + 1] - x_bounds[col]),
+                h=max(1, y_bounds[row + 1] - y_bounds[row]),
             )
-            bboxes_latent.append(lat)
-            bboxes_pixel.append(pix)
+            context_lat = expand_bbox_clamped(core_lat, context_pad_l, context_pad_l, latent_width, latent_height)
+            write_lat = expand_bbox_clamped(core_lat, blend_feather_l, blend_feather_l, latent_width, latent_height)
+
+            core_pix = RegionBBox(
+                x=core_lat.x * compression,
+                y=core_lat.y * compression,
+                w=core_lat.w * compression,
+                h=core_lat.h * compression,
+            )
+            context_pix = RegionBBox(
+                x=context_lat.x * compression,
+                y=context_lat.y * compression,
+                w=context_lat.w * compression,
+                h=context_lat.h * compression,
+            )
+            write_pix = RegionBBox(
+                x=write_lat.x * compression,
+                y=write_lat.y * compression,
+                w=write_lat.w * compression,
+                h=write_lat.h * compression,
+            )
+
+            bboxes_latent.append(context_lat)
+            bboxes_pixel.append(context_pix)
+            core_bboxes_latent.append(core_lat)
+            core_bboxes_pixel.append(core_pix)
+            write_bboxes_latent.append(write_lat)
+            write_bboxes_pixel.append(write_pix)
 
     return RegionPlan(
         original_width=aligned_width if original_width is None else original_width,
@@ -325,32 +383,77 @@ def build_region_plan(
         region_width=effective_region_width,
         region_height=effective_region_height,
         region_overlap=effective_region_overlap,
-        region_width_latent=rw_l,
-        region_height_latent=rh_l,
-        region_overlap_latent=ro_l,
-        rows=len(ys),
-        cols=len(xs),
+        region_width_latent=rw_l_target,
+        region_height_latent=rh_l_target,
+        region_overlap_latent=context_pad_l,
+        blend_feather=effective_blend_feather,
+        blend_feather_latent=blend_feather_l,
+        rows=rows,
+        cols=cols,
         bboxes_latent=bboxes_latent,
         bboxes_pixel=bboxes_pixel,
+        core_bboxes_latent=core_bboxes_latent,
+        core_bboxes_pixel=core_bboxes_pixel,
+        write_bboxes_latent=write_bboxes_latent,
+        write_bboxes_pixel=write_bboxes_pixel,
     )
+
 
 
 def region_order_text(plan: RegionPlan) -> str:
     lines = []
-    for idx, (pb, lb) in enumerate(zip(plan.bboxes_pixel, plan.bboxes_latent), start=1):
+    for idx, (cpb, clb, kpb, klb, wpb, wlb) in enumerate(
+        zip(
+            plan.bboxes_pixel,
+            plan.bboxes_latent,
+            plan.core_bboxes_pixel,
+            plan.core_bboxes_latent,
+            plan.write_bboxes_pixel,
+            plan.write_bboxes_latent,
+        ),
+        start=1,
+    ):
         row = (idx - 1) // plan.cols
         col = (idx - 1) % plan.cols
         lines.append(
-            f"region {idx}: row={row}, col={col}, pixel_bbox={pb.box}, latent_bbox={lb.box}"
+            f"region {idx}: row={row}, col={col}, "
+            f"core_pixel_bbox={kpb.box}, core_latent_bbox={klb.box}, "
+            f"write_pixel_bbox={wpb.box}, write_latent_bbox={wlb.box}, "
+            f"context_pixel_bbox={cpb.box}, context_latent_bbox={clb.box}"
         )
     return "\n".join(lines)
 
 
-def extract_region_images(image: torch.Tensor, plan: RegionPlan) -> list[torch.Tensor]:
+def extract_region_images(image: torch.Tensor, plan: RegionPlan, *, use_core: bool = True) -> list[torch.Tensor]:
+    bboxes = plan.core_bboxes_pixel if use_core else plan.bboxes_pixel
     out = []
-    for bbox in plan.bboxes_pixel:
+    for bbox in bboxes:
         out.append(image[:, bbox.y:bbox.y2, bbox.x:bbox.x2, :])
     return out
+
+
+def stack_region_images_with_padding(regions: Sequence[torch.Tensor], *, pad_mode: str = "edge") -> torch.Tensor:
+    if not regions:
+        raise ValueError("regions must be non-empty")
+    max_h = max(int(r.shape[1]) for r in regions)
+    max_w = max(int(r.shape[2]) for r in regions)
+    padded = []
+    for region in regions:
+        _, h, w, _ = region.shape
+        pad_right = max_w - int(w)
+        pad_bottom = max_h - int(h)
+        if pad_right or pad_bottom:
+            region = pad_bhwc(
+                region,
+                pad_left=0,
+                pad_right=pad_right,
+                pad_top=0,
+                pad_bottom=pad_bottom,
+                mode=pad_mode,
+                value=0.0,
+            )
+        padded.append(region)
+    return torch.cat(padded, dim=0)
 
 
 # ============================================================
@@ -362,24 +465,23 @@ def collapse_prompt_text(s: str) -> str:
 
 
 def normalize_prompt_input(raw: Any) -> list[str]:
-    if raw is None:
-        return []
+    def _normalize_one(value: Any) -> list[str]:
+        if value is None:
+            return []
 
-    if isinstance(raw, str):
-        return [line.strip() for line in raw.splitlines() if line.strip()]
+        if isinstance(value, str):
+            return [line.strip() for line in value.splitlines() if line.strip()]
 
-    if isinstance(raw, (list, tuple)):
-        out: list[str] = []
-        for item in raw:
-            if item is None:
-                continue
-            t = collapse_prompt_text(str(item))
-            if t:
-                out.append(t)
-        return out
+        if isinstance(value, (list, tuple)):
+            out: list[str] = []
+            for item in value:
+                out.extend(_normalize_one(item))
+            return out
 
-    t = collapse_prompt_text(str(raw))
-    return [t] if t else []
+        t = collapse_prompt_text(str(value))
+        return [t] if t else []
+
+    return _normalize_one(raw)
 
 
 def repeat_crossattn_to_length(t: torch.Tensor, target_len: int) -> torch.Tensor:
@@ -471,31 +573,46 @@ def fixed_count_axis_positions(full_size: int, tile_size: int, count: int) -> li
     return [int(round((i / (count - 1)) * last_start)) for i in range(count)]
 
 
+def scale_bbox_list_to_tensor(
+    bboxes: Sequence[RegionBBox],
+    *,
+    latent_height: int,
+    latent_width: int,
+    tensor_height: int,
+    tensor_width: int,
+) -> list[RegionBBox]:
+    if latent_height <= 0 or latent_width <= 0:
+        raise ValueError("latent dimensions must be positive")
+    if tensor_height <= 0 or tensor_width <= 0:
+        raise ValueError("tensor dimensions must be positive")
+
+    scaled: list[RegionBBox] = []
+    for bbox in bboxes:
+        x1 = int(math.floor((bbox.x * tensor_width) / latent_width))
+        y1 = int(math.floor((bbox.y * tensor_height) / latent_height))
+        x2 = int(math.ceil((bbox.x2 * tensor_width) / latent_width))
+        y2 = int(math.ceil((bbox.y2 * tensor_height) / latent_height))
+        x1 = max(0, min(max(0, tensor_width - 1), x1))
+        y1 = max(0, min(max(0, tensor_height - 1), y1))
+        x2 = max(x1 + 1, min(tensor_width, x2))
+        y2 = max(y1 + 1, min(tensor_height, y2))
+        scaled.append(RegionBBox(x=x1, y=y1, w=x2 - x1, h=y2 - y1))
+    return scaled
+
+
 def build_scaled_bboxes_for_plan(
     region_plan: RegionPlan,
     *,
     tensor_height: int,
     tensor_width: int,
 ) -> list[RegionBBox]:
-    tile_w = scale_region_extent_to_tensor(
-        full_latent_extent=region_plan.latent_width,
-        tensor_extent=tensor_width,
-        region_extent=region_plan.region_width_latent,
+    return scale_bbox_list_to_tensor(
+        region_plan.bboxes_latent,
+        latent_height=region_plan.latent_height,
+        latent_width=region_plan.latent_width,
+        tensor_height=tensor_height,
+        tensor_width=tensor_width,
     )
-    tile_h = scale_region_extent_to_tensor(
-        full_latent_extent=region_plan.latent_height,
-        tensor_extent=tensor_height,
-        region_extent=region_plan.region_height_latent,
-    )
-
-    xs = fixed_count_axis_positions(tensor_width, tile_w, region_plan.cols)
-    ys = fixed_count_axis_positions(tensor_height, tile_h, region_plan.rows)
-
-    bboxes: list[RegionBBox] = []
-    for y in ys:
-        for x in xs:
-            bboxes.append(RegionBBox(x=x, y=y, w=tile_w, h=tile_h))
-    return bboxes
 
 
 def slice_spatial_tensor_for_region_batch(
@@ -510,7 +627,7 @@ def slice_spatial_tensor_for_region_batch(
         raise ValueError("spatial tensor must be 4D")
 
     if tensor.shape[-2] == latent_height and tensor.shape[-1] == latent_width:
-        bboxes = batch.latent_bboxes
+        bboxes = batch.context_bboxes
     else:
         scaled_bboxes = build_scaled_bboxes_for_plan(
             region_plan,
@@ -534,6 +651,53 @@ def latent_dict_to_tensor(latent: dict[str, Any]) -> torch.Tensor:
     if samples.ndim != 4:
         raise ValueError("LATENT samples tensor must be 4D")
     return samples
+
+
+def blank_image_bhwc(width: int, height: int, *, dtype=torch.float32, device=None) -> torch.Tensor:
+    return torch.zeros((1, int(height), int(width), 3), dtype=dtype, device=device)
+
+
+def fit_image_to_exact_canvas(
+    image: torch.Tensor,
+    target_width: int,
+    target_height: int,
+    alignment_mode: str,
+) -> tuple[torch.Tensor, dict[str, int | str]]:
+    """Fit an IMAGE tensor to an exact target canvas without introducing resize deformation.
+
+    When a LATENT is provided to Region Plan, the target canvas must match the latent size exactly.
+    This helper keeps the existing top-left anchored behavior:
+    - crop excess on the bottom/right when the image is larger than target
+    - reflect-pad on the bottom/right when the image is smaller than target
+    """
+    _, h, w, _ = image.shape
+    normalized_mode = "floor_crop" if alignment_mode == "floor_crop" else "pad_reflect"
+    cropped = image[:, :min(h, target_height), :min(w, target_width), :]
+    _, ch, cw, _ = cropped.shape
+    pad_right = max(0, int(target_width) - int(cw))
+    pad_bottom = max(0, int(target_height) - int(ch))
+    pad_left = 0
+    pad_top = 0
+    if pad_right or pad_bottom:
+        cropped = pad_bhwc(
+            cropped,
+            pad_left=pad_left,
+            pad_right=pad_right,
+            pad_top=pad_top,
+            pad_bottom=pad_bottom,
+            mode="reflect",
+            value=0.0,
+        )
+    meta: dict[str, int | str] = {
+        "original_width": target_width,
+        "original_height": target_height,
+        "alignment_mode": normalized_mode,
+        "pad_left": pad_left,
+        "pad_top": pad_top,
+        "pad_right": pad_right,
+        "pad_bottom": pad_bottom,
+    }
+    return cropped, meta
 
 
 @dataclass(frozen=True)
@@ -612,7 +776,9 @@ class RegionalConditioningBatch:
 @dataclass(frozen=True)
 class RuntimeRegionBatch:
     region_indices: list[int]
-    latent_bboxes: list[RegionBBox]
+    context_bboxes: list[RegionBBox]
+    core_bboxes: list[RegionBBox]
+    write_bboxes: list[RegionBBox]
 
 
 @dataclass
@@ -636,16 +802,42 @@ class AdaptiveRuntimeInputs:
 # adaptive diffusion
 # ============================================================
 
+
 def build_region_batches(region_plan: RegionPlan, max_batch_size: int) -> list[RuntimeRegionBatch]:
     if max_batch_size <= 0:
         raise ValueError("max_batch_size must be positive")
-    batches = []
+    batches: list[RuntimeRegionBatch] = []
     total = len(region_plan.bboxes_latent)
-    for start in range(0, total, max_batch_size):
-        end = min(start + max_batch_size, total)
-        indices = list(range(start, end))
-        bboxes = [region_plan.bboxes_latent[i] for i in indices]
-        batches.append(RuntimeRegionBatch(region_indices=indices, latent_bboxes=bboxes))
+    current_indices: list[int] = []
+    current_size: tuple[int, int] | None = None
+
+    def _flush() -> None:
+        nonlocal current_indices, current_size
+        if not current_indices:
+            return
+        indices = list(current_indices)
+        batches.append(
+            RuntimeRegionBatch(
+                region_indices=indices,
+                context_bboxes=[region_plan.bboxes_latent[i] for i in indices],
+                core_bboxes=[region_plan.core_bboxes_latent[i] for i in indices],
+                write_bboxes=[region_plan.write_bboxes_latent[i] for i in indices],
+            )
+        )
+        current_indices = []
+        current_size = None
+
+    for idx in range(total):
+        bbox = region_plan.bboxes_latent[idx]
+        size = (int(bbox.h), int(bbox.w))
+        if current_size is None:
+            current_size = size
+        if size != current_size or len(current_indices) >= max_batch_size:
+            _flush()
+            current_size = size
+        current_indices.append(idx)
+
+    _flush()
     return batches
 
 
@@ -666,44 +858,84 @@ def initialize_canvas_state(latent: torch.Tensor) -> RuntimeCanvasState:
     )
 
 
+
+def _build_axis_write_weight(length: int, inner_start: int, inner_end: int, outer_start: int, outer_end: int, *, device) -> torch.Tensor:
+    w = torch.zeros(length, device=device, dtype=torch.float32)
+    if inner_end > inner_start:
+        w[inner_start:inner_end] = 1.0
+
+    if inner_start > outer_start:
+        left_len = inner_start - outer_start
+        if left_len == 1:
+            w[outer_start:inner_start] = 0.5
+        else:
+            w[outer_start:inner_start] = torch.linspace(
+                0.0,
+                1.0,
+                left_len + 2,
+                device=device,
+                dtype=torch.float32,
+            )[1:-1]
+
+    if outer_end > inner_end:
+        right_len = outer_end - inner_end
+        if right_len == 1:
+            w[inner_end:outer_end] = 0.5
+        else:
+            w[inner_end:outer_end] = torch.linspace(
+                1.0,
+                0.0,
+                right_len + 2,
+                device=device,
+                dtype=torch.float32,
+            )[1:-1]
+
+    return w.clamp_(0.0, 1.0)
+
+
 def build_bbox_blend_weight(
     region_plan: RegionPlan,
-    bbox: RegionBBox,
+    context_bbox: RegionBBox,
+    core_bbox: RegionBBox,
+    write_bbox: RegionBBox,
     *,
     device,
     dtype=torch.float32,
-    min_overlap_weight: float = 1e-3,
 ) -> torch.Tensor:
-    h = bbox.h
-    w = bbox.w
-    ov = int(region_plan.region_overlap_latent)
+    h = context_bbox.h
+    w = context_bbox.w
 
-    xw = torch.ones(w, device=device, dtype=torch.float32)
-    yw = torch.ones(h, device=device, dtype=torch.float32)
+    core_x1 = max(0, core_bbox.x - context_bbox.x)
+    core_y1 = max(0, core_bbox.y - context_bbox.y)
+    core_x2 = min(w, core_x1 + core_bbox.w)
+    core_y2 = min(h, core_y1 + core_bbox.h)
 
-    if ov > 0:
-        left_ramp = torch.linspace(min_overlap_weight, 1.0, ov, device=device, dtype=torch.float32)
-        right_ramp = torch.linspace(1.0, min_overlap_weight, ov, device=device, dtype=torch.float32)
+    write_x1 = max(0, write_bbox.x - context_bbox.x)
+    write_y1 = max(0, write_bbox.y - context_bbox.y)
+    write_x2 = min(w, write_x1 + write_bbox.w)
+    write_y2 = min(h, write_y1 + write_bbox.h)
 
-        if bbox.x > 0:
-            xw[:ov] = torch.minimum(xw[:ov], left_ramp)
-
-        if bbox.x2 < region_plan.latent_width:
-            xw[-ov:] = torch.minimum(xw[-ov:], right_ramp)
-
-        if bbox.y > 0:
-            yw[:ov] = torch.minimum(yw[:ov], left_ramp)
-
-        if bbox.y2 < region_plan.latent_height:
-            yw[-ov:] = torch.minimum(yw[-ov:], right_ramp)
-
-    return torch.outer(yw, xw).unsqueeze(0).unsqueeze(0).to(dtype=dtype)
+    xw = _build_axis_write_weight(w, core_x1, core_x2, write_x1, write_x2, device=device)
+    yw = _build_axis_write_weight(h, core_y1, core_y2, write_y1, write_y2, device=device)
+    weight = torch.outer(yw, xw).unsqueeze(0).unsqueeze(0)
+    return weight.to(dtype=dtype)
 
 
 def build_region_weight_map(region_plan: RegionPlan, *, device) -> list[torch.Tensor]:
     return [
-        build_bbox_blend_weight(region_plan, bbox, device=device, dtype=torch.float32)
-        for bbox in region_plan.bboxes_latent
+        build_bbox_blend_weight(
+            region_plan,
+            context_bbox,
+            core_bbox,
+            write_bbox,
+            device=device,
+            dtype=torch.float32,
+        )
+        for context_bbox, core_bbox, write_bbox in zip(
+            region_plan.bboxes_latent,
+            region_plan.core_bboxes_latent,
+            region_plan.write_bboxes_latent,
+        )
     ]
 
 
@@ -778,9 +1010,9 @@ def accumulate_region_outputs(
     *,
     region_weights: list[torch.Tensor],
 ) -> None:
-    per_region_batch = region_outputs.shape[0] // len(region_batch.latent_bboxes)
+    per_region_batch = region_outputs.shape[0] // len(region_batch.context_bboxes)
 
-    for i, bbox in enumerate(region_batch.latent_bboxes):
+    for i, bbox in enumerate(region_batch.context_bboxes):
         weight = region_weights[i].to(
             device=canvas_state.output_accumulator.device,
             dtype=canvas_state.output_accumulator.dtype,
@@ -977,7 +1209,7 @@ class EgregoraAdaptiveRegionalMixer:
         base_batch = latent.shape[0] // group_count
 
         for batch in self.build_batches():
-            x_regions = slice_latent_regions(latent, batch.latent_bboxes)
+            x_regions = slice_latent_regions(latent, batch.context_bboxes)
             t_regions = repeat_to_batch_size(timestep, x_regions.shape[0], dim=0)
 
             c_regions = {}
@@ -1020,6 +1252,9 @@ class EgregoraAdaptiveRegionalMixer:
             if control_obj is not None:
                 if self.runtime_inputs.debug_runtime and not getattr(self, "_control_call_debug_logged", False):
                     print("[Egregora-ARMD] x_regions:", tuple(x_regions.shape))
+                    print("[Egregora-ARMD] context bboxes:", [bbox.box for bbox in batch.context_bboxes])
+                    print("[Egregora-ARMD] core bboxes:", [bbox.box for bbox in batch.core_bboxes])
+                    print("[Egregora-ARMD] write bboxes:", [bbox.box for bbox in batch.write_bboxes])
                     print("[Egregora-ARMD] control dict sliced for current regional batch")
                     self._control_call_debug_logged = True
                 c_regions["control"] = control_obj
@@ -1050,10 +1285,10 @@ class EgregoraRegionPlan:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "image": ("IMAGE",),
                 "region_width": ("INT", {"default": 1024, "min": 64, "max": 8192, "step": 8}),
                 "region_height": ("INT", {"default": 1024, "min": 64, "max": 8192, "step": 8}),
-                "region_overlap": ("INT", {"default": 64, "min": 0, "max": 2048, "step": 8}),
+                "region_overlap": ("INT", {"default": 384, "min": 0, "max": 2048, "step": 8}),
+                "blend_feather": ("INT", {"default": 64, "min": 0, "max": 512, "step": 8}),
                 "compression": ("INT", {"default": 8, "min": 1, "max": 16, "step": 1}),
                 "alignment_mode": (
                     [
@@ -1062,7 +1297,11 @@ class EgregoraRegionPlan:
                     ],
                     {"default": "pad_reflect"},
                 ),
-            }
+            },
+            "optional": {
+                "image": ("IMAGE",),
+                "latent": ("LATENT",),
+            },
         }
 
     RETURN_TYPES = ("IMAGE", "IMAGE", "IMAGE", "EGREGORA_REGION_PLAN", "INT", "STRING")
@@ -1071,10 +1310,39 @@ class EgregoraRegionPlan:
     FUNCTION = "plan"
     CATEGORY = "Egregora-ARMD"
 
-    def plan(self, image, region_width, region_height, region_overlap, compression, alignment_mode):
-        aligned, alignment_meta = align_image_to_compression(image, compression, alignment_mode)
+    def plan(self, region_width, region_height, region_overlap, blend_feather, compression, alignment_mode, image=None, latent=None):
+        if image is None and latent is None:
+            raise ValueError("Egregora Region Plan requires either an IMAGE or a LATENT input")
+
+        aligned: torch.Tensor
+        alignment_meta: dict[str, int | str]
+        original_w: int
+        original_h: int
+
+        if latent is not None:
+            latent_samples = latent_dict_to_tensor(latent)
+            target_h = int(latent_samples.shape[-2]) * int(compression)
+            target_w = int(latent_samples.shape[-1]) * int(compression)
+            original_w = target_w
+            original_h = target_h
+            if image is None:
+                aligned = blank_image_bhwc(target_w, target_h)
+                alignment_meta = {
+                    "original_width": target_w,
+                    "original_height": target_h,
+                    "alignment_mode": "pad_reflect" if alignment_mode != "floor_crop" else "floor_crop",
+                    "pad_left": 0,
+                    "pad_top": 0,
+                    "pad_right": 0,
+                    "pad_bottom": 0,
+                }
+            else:
+                aligned, alignment_meta = fit_image_to_exact_canvas(image, target_w, target_h, alignment_mode)
+        else:
+            aligned, alignment_meta = align_image_to_compression(image, compression, alignment_mode)
+            _, original_h, original_w, _ = image.shape
+
         _, h, w, _ = aligned.shape
-        _, original_h, original_w, _ = image.shape
         plan = build_region_plan(
             aligned_width=w,
             aligned_height=h,
@@ -1082,6 +1350,7 @@ class EgregoraRegionPlan:
             region_height=region_height,
             region_overlap=region_overlap,
             compression=compression,
+            blend_feather=blend_feather,
             original_width=original_w,
             original_height=original_h,
             alignment_mode=str(alignment_meta["alignment_mode"]),
@@ -1090,12 +1359,13 @@ class EgregoraRegionPlan:
             pad_right=int(alignment_meta["pad_right"]),
             pad_bottom=int(alignment_meta["pad_bottom"]),
         )
-        regions = extract_region_images(aligned, plan)
-        regions_batch = torch.cat(regions, dim=0) if regions else aligned[:0]
+        context_regions = extract_region_images(aligned, plan, use_core=False)
+        core_regions = extract_region_images(aligned, plan, use_core=True)
+        regions_batch = stack_region_images_with_padding(context_regions, pad_mode="edge") if context_regions else aligned[:0]
         return (
             aligned,
             regions_batch,
-            regions,
+            core_regions,
             plan,
             plan.region_count,
             region_order_text(plan),
