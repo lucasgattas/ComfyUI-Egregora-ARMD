@@ -85,7 +85,7 @@ That balance is what makes ARMD effective both for:
 
 ---
 
-## 🆕 What changed in v0.3.1
+## 🆕 What changed in v0.1.1
 
 ### Bug fixes
 
