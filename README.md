@@ -85,6 +85,42 @@ That balance is what makes ARMD effective both for:
 
 ---
 
+## 🆕 What changed in v0.3.1
+
+### Bug fixes
+
+- **Negative prompts with text now work correctly**
+  - The previous cross-attention length strategy could cause OOM and visual deformation when prompt lengths differed too much.
+  - ARMD now uses **max-length + zero-padding** instead of semantic repetition.
+  - This removes the LCM explosion problem and keeps token semantics intact.
+
+- **`pooled_output` is now preserved for SDXL-like workflows**
+  - Regional conditioning now preserves `pooled_output` instead of dropping it.
+  - Each region can inject its own pooled style embedding instead of inheriting only a global placeholder.
+  - This is especially important for **SDXL / Z-Image Turbo** style workflows.
+
+- **Unnecessary CPU↔GPU transfers were removed from conditioning**
+  - Regional conditioning tensors are no longer forced through extra CPU round-trips before use.
+
+### Performance improvements
+
+- **Length-aware batching for mixed regional prompt sizes**
+  - Regions are grouped by context bbox size and then sorted by prompt length inside those groups.
+  - This reduces useless cross-attention padding when users mix short and long prompts.
+  - In practical mixed-prompt scenarios, this can reduce attention waste substantially, especially in **6K+** workflows with many regions.
+
+### Robustness improvements
+
+- **Strict validation before injecting pooled embeddings into `y`**
+  - ARMD now validates pooled tensor shape before injecting it into SDXL-style `y`.
+  - If the architecture does not match the expected layout, ARMD safely falls back instead of silently corrupting the tensor.
+
+- **More tolerant exact-canvas fitting**
+  - `fit_image_to_exact_canvas` now uses a **1% relative aspect-ratio tolerance** instead of an ultra-strict near-zero threshold.
+  - This avoids false mismatches caused by rounding in upstream resize pipelines.
+
+---
+
 ## 🧩 Included nodes
 
 ### 🧭 Egregora Region Plan
@@ -111,6 +147,11 @@ It creates:
 
 These placeholders are useful for compatibility with nodes that still expect standard conditioning objects.
 
+In v0.3.1, regional conditioning also preserves:
+- `c_crossattn`
+- `pooled_output` when available
+- extra conditioning fields needed for safer SDXL-like regional injection
+
 ### 🌐 Egregora Adaptive Diffusion Apply
 Applies ARMD to a model.
 
@@ -122,6 +163,8 @@ It:
 - builds regional runtime batches
 - uses context regions for reading
 - writes back using feathered local ownership
+
+In v0.3.1, batching is also more efficient for mixed prompt sizes, and debug logging is clearer when batch order differs from spatial order.
 
 ### 🔎 Egregora Region Select
 Lets you inspect a single region for:
@@ -166,6 +209,11 @@ This is the safest general-purpose option.
 This crops the image down to the nearest compatible size.
 
 Use it only if you explicitly prefer cropping over padding.
+
+### Exact canvas fit when using IMAGE + LATENT
+When a LATENT defines the canvas and an IMAGE is also provided, ARMD uses an exact-canvas fitting path rather than reflect-padding the image arbitrarily.
+
+This path now tolerates small upstream aspect-ratio rounding differences, while still rejecting real mismatches.
 
 ---
 
@@ -230,6 +278,8 @@ Negative prompts can be used in three ways:
 - leave empty → ARMD uses empty negatives for all regions
 - provide **one** negative line → it is reused for all regions
 - provide one negative line per region
+
+In v0.3.1, negative prompts with text are handled much more safely than before, even when prompt lengths vary significantly.
 
 ---
 
@@ -406,6 +456,35 @@ ARMD addresses that by combining:
 - regional conditioning
 - context-aware denoising
 - controlled write-back
+
+---
+
+## ⚙️ Important note about batching order
+
+In v0.1.1, ARMD may process regions in an order that differs from the spatial row-major order.
+
+This is intentional.
+
+When prompt lengths differ substantially, ARMD groups regions by **same context bbox size** and then sorts them by **prompt length** inside those groups before batching.
+
+Why this exists:
+- it reduces useless cross-attention padding
+- it improves efficiency when users mix short and long prompts
+- it becomes increasingly relevant in large high-resolution workflows with many regions
+
+What it does **not** change:
+- each region still reads the correct context crop
+- each region still writes back to the correct canvas position
+- the final visual accumulation remains spatially correct
+
+This means the output is still correct, even if logs show a processing order that looks different from the visual layout.
+
+If `debug_runtime=True`, ARMD now prints:
+- `region_count`
+- `batch_count`
+- `region_indices_per_batch`
+
+This makes the batching order explicit and easier to debug.
 
 ---
 
