@@ -147,7 +147,7 @@ It creates:
 
 These placeholders are useful for compatibility with nodes that still expect standard conditioning objects.
 
-In v0.3.1, regional conditioning also preserves:
+In v0.1.1, regional conditioning also preserves:
 - `c_crossattn`
 - `pooled_output` when available
 - extra conditioning fields needed for safer SDXL-like regional injection
@@ -164,7 +164,7 @@ It:
 - uses context regions for reading
 - writes back using feathered local ownership
 
-In v0.3.1, batching is also more efficient for mixed prompt sizes, and debug logging is clearer when batch order differs from spatial order.
+In v0.1.1, batching is also more efficient for mixed prompt sizes, and debug logging is clearer when batch order differs from spatial order.
 
 ### 🔎 Egregora Region Select
 Lets you inspect a single region for:
@@ -279,7 +279,7 @@ Negative prompts can be used in three ways:
 - provide **one** negative line → it is reused for all regions
 - provide one negative line per region
 
-In v0.3.1, negative prompts with text are handled much more safely than before, even when prompt lengths vary significantly.
+In v0.1.1, negative prompts with text are handled much more safely than before, even when prompt lengths vary significantly.
 
 ---
 
