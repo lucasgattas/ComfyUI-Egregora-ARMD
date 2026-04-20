@@ -3,7 +3,7 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "comfyui-egregora-armd"
+name = "comfyUI-egregora-armd"
 version = "0.1.1"
 description = "🌐 ARMD (Adaptive Regional Mixture of Diffusers) is a region-based diffusion system for ComfyUI, designed for semantic upscaling with per-region conditioning, optional VLM captioning, and adaptive regional reconstruction."
 readme = "README.md"
