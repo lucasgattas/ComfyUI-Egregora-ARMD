@@ -14,7 +14,7 @@ from comfy.utils import repeat_to_batch_size
 # version
 # ============================================================
 
-__version__ = "0.2.4"
+__version__ = "0.3.1"
 
 
 # ============================================================
@@ -39,14 +39,6 @@ def ceil_multiple(v: int, mult: int) -> int:
         raise ValueError("mult must be positive")
     return max(mult, int(math.ceil(v / mult)) * mult)
 
-
-def lcm_for_lengths(lengths: Sequence[int]) -> int:
-    if not lengths:
-        return 1
-    acc = int(lengths[0])
-    for length in lengths[1:]:
-        acc = math.lcm(acc, int(length))
-    return acc
 
 
 def axis_positions(full_size: int, tile_size: int, overlap: int) -> list[int]:
@@ -484,26 +476,45 @@ def normalize_prompt_input(raw: Any) -> list[str]:
     return _normalize_one(raw)
 
 
-def repeat_crossattn_to_length(t: torch.Tensor, target_len: int) -> torch.Tensor:
+def pad_crossattn_to_length(t: torch.Tensor, target_len: int) -> torch.Tensor:
+    """Pad a cross-attention tensor to target_len along the sequence axis.
+
+    Uses zero-padding so that existing token semantics are unchanged.
+    This replaces the previous repeat strategy which caused semantic
+    duplication and could trigger OOM when the LCM of mixed prompt
+    lengths grew very large.
+    """
     if t.shape[1] == target_len:
         return t
-    if target_len % t.shape[1] != 0:
-        raise ValueError(
-            f"cannot expand c_crossattn length {t.shape[1]} to target {target_len} cleanly"
-        )
-    return t.repeat(1, target_len // t.shape[1], 1)
+    if t.shape[1] > target_len:
+        return t[:, :target_len, :]
+    pad_len = target_len - t.shape[1]
+    return F.pad(t, (0, 0, 0, pad_len))
 
 
-def conditioning_to_local_entry(conditioning: Any) -> dict[str, torch.Tensor]:
+def conditioning_to_local_entry(conditioning: Any) -> dict[str, Any]:
+    """Extract c_crossattn and pooled_output from a ComfyUI conditioning list.
+
+    Stores tensors on their current device (no .cpu() transfer) to avoid
+    repeated CPU↔GPU copies at every denoising step.
+
+    The 'extra' dict preserves pooled_output (SDXL CLIP-G pool) and any
+    other fields returned by CLIPTextEncode so they can be injected as
+    per-region conditioning in the UNet call.
+    """
     if not isinstance(conditioning, list) or len(conditioning) == 0:
         raise ValueError("unexpected conditioning format")
     base = conditioning[0]
-    if not isinstance(base, (list, tuple)) or len(base) < 2:
+    if not isinstance(base, (list, tuple)) or len(base) < 1:
         raise ValueError("unexpected conditioning entry format")
     cross = base[0]
     if not isinstance(cross, torch.Tensor):
         raise ValueError("conditioning c_crossattn tensor not found")
-    return {"c_crossattn": cross.detach().cpu()}
+    extra: dict[str, Any] = {}
+    if len(base) > 1 and isinstance(base[1], dict):
+        for k, v in base[1].items():
+            extra[k] = v.detach() if isinstance(v, torch.Tensor) else v
+    return {"c_crossattn": cross.detach(), "extra": extra}
 
 
 # ============================================================
@@ -683,8 +694,12 @@ def fit_image_to_exact_canvas(
     src_ratio = float(w) / float(h)
     dst_ratio = float(target_width) / float(target_height)
 
-    # Allow tiny floating-point differences for equal-ratio canvases.
-    if abs(src_ratio - dst_ratio) > 1e-6:
+    # Tolerate up to 1% relative aspect-ratio difference to absorb rounding
+    # errors that accumulate in upstream resize pipelines (e.g. one pixel off
+    # after a bilinear resize).  Stricter than that risks rejecting canvases
+    # that are visually equivalent while still catching genuine mismatches.
+    ratio_tolerance = max(src_ratio, dst_ratio) * 0.01
+    if abs(src_ratio - dst_ratio) > ratio_tolerance:
         raise ValueError(
             "IMAGE and LATENT aspect ratios do not match. "
             "Please resize/crop the IMAGE upstream to match the LATENT canvas exactly."
@@ -777,6 +792,9 @@ class RegionalConditioningBatch:
     negative_crossattn: torch.Tensor
     region_indices: list[int]
     sequence_length: int
+    # Per-region pooled outputs for SDXL y-conditioning (None when not available)
+    positive_pooled: list[torch.Tensor | None]
+    negative_pooled: list[torch.Tensor | None]
 
 
 @dataclass(frozen=True)
@@ -795,11 +813,12 @@ class RuntimeCanvasState:
     weight_accumulator: torch.Tensor
 
 
+
 @dataclass(frozen=True)
 class AdaptiveRuntimeInputs:
     region_plan: RegionPlan
-    positive_entries: list[dict[str, torch.Tensor]]
-    negative_entries: list[dict[str, torch.Tensor]]
+    positive_entries: list[dict[str, Any]]
+    negative_entries: list[dict[str, Any]]
     runtime_payload_adapter: RuntimePayloadAdapter | None = None
     debug_runtime: bool = False
 
@@ -844,6 +863,76 @@ def build_region_batches(region_plan: RegionPlan, max_batch_size: int) -> list[R
         current_indices.append(idx)
 
     _flush()
+    return batches
+
+
+def build_region_batches_length_aware(
+    region_plan: RegionPlan,
+    positive_entries: list[dict],
+    max_batch_size: int,
+) -> list[RuntimeRegionBatch]:
+    """Like build_region_batches but sorts regions by prompt length within each
+    same-bbox-size group before dividing into batches.
+
+    When users provide prompts of wildly different lengths (e.g. 30 tokens vs
+    300 tokens), the default row-major ordering may place short and long prompts
+    in the same batch, forcing all slots to pad to max length.  Grouping by
+    length first means each batch sees prompts of similar length, which
+    minimises the zero-padding overhead and reduces VRAM usage at high region
+    counts (6K+ upscaling).
+
+    The bbox-size constraint is always respected: regions with different context
+    crop sizes cannot share a batch.
+    """
+    if max_batch_size <= 0:
+        raise ValueError("max_batch_size must be positive")
+
+    # Collect (bbox_size, prompt_length, region_index) triples.
+    triplets: list[tuple[tuple[int, int], int, int]] = []
+    for idx in range(len(region_plan.bboxes_latent)):
+        bbox = region_plan.bboxes_latent[idx]
+        size = (int(bbox.h), int(bbox.w))
+        if idx < len(positive_entries):
+            cross = positive_entries[idx].get("c_crossattn", None)
+            plen = int(cross.shape[1]) if cross is not None else 0
+        else:
+            plen = 0
+        triplets.append((size, plen, idx))
+
+    # Primary sort key: bbox size (ensures same-size groups stay together).
+    # Secondary sort key: prompt length descending (longest first so that
+    # padding decreases as we fill batches within a group).
+    triplets.sort(key=lambda t: (t[0], -t[1]))
+
+    batches: list[RuntimeRegionBatch] = []
+    current_indices: list[int] = []
+    current_size: tuple[int, int] | None = None
+
+    def _flush_la() -> None:
+        nonlocal current_indices, current_size
+        if not current_indices:
+            return
+        indices = list(current_indices)
+        batches.append(
+            RuntimeRegionBatch(
+                region_indices=indices,
+                context_bboxes=[region_plan.bboxes_latent[i] for i in indices],
+                core_bboxes=[region_plan.core_bboxes_latent[i] for i in indices],
+                write_bboxes=[region_plan.write_bboxes_latent[i] for i in indices],
+            )
+        )
+        current_indices = []
+        current_size = None
+
+    for size, _plen, idx in triplets:
+        if current_size is None:
+            current_size = size
+        if size != current_size or len(current_indices) >= max_batch_size:
+            _flush_la()
+            current_size = size
+        current_indices.append(idx)
+
+    _flush_la()
     return batches
 
 
@@ -952,36 +1041,57 @@ def build_regional_conditioning_batch(
     device=None,
     dtype=None,
 ) -> RegionalConditioningBatch:
-    pos = [runtime_inputs.positive_entries[i]["c_crossattn"] for i in region_indices]
-    neg = [runtime_inputs.negative_entries[i]["c_crossattn"] for i in region_indices]
+    pos_cross = [runtime_inputs.positive_entries[i]["c_crossattn"] for i in region_indices]
+    neg_cross = [runtime_inputs.negative_entries[i]["c_crossattn"] for i in region_indices]
 
-    all_lengths = [int(t.shape[1]) for t in pos] + [int(t.shape[1]) for t in neg]
-    target_len = lcm_for_lengths(all_lengths)
+    # Use max-length + zero-padding instead of LCM + semantic repeat.
+    # LCM can explode (e.g. lcm(154,231)=462) with mixed prompt lengths,
+    # causing severe OOM and garbled outputs.  Padding with zeros does not
+    # alter the meaning of existing tokens and stays within normal bounds.
+    all_lengths = [int(t.shape[1]) for t in pos_cross + neg_cross]
+    target_len = max(all_lengths) if all_lengths else 77
 
     pos_batch = torch.cat(
-        [repeat_crossattn_to_length(t, target_len) for t in pos],
+        [pad_crossattn_to_length(t, target_len) for t in pos_cross],
         dim=0,
     )
     neg_batch = torch.cat(
-        [repeat_crossattn_to_length(t, target_len) for t in neg],
+        [pad_crossattn_to_length(t, target_len) for t in neg_cross],
         dim=0,
     )
 
     if device is not None or dtype is not None:
-        pos_batch = pos_batch.to(
-            device=device if device is not None else pos_batch.device,
-            dtype=dtype if dtype is not None else pos_batch.dtype,
-        )
-        neg_batch = neg_batch.to(
-            device=device if device is not None else neg_batch.device,
-            dtype=dtype if dtype is not None else neg_batch.dtype,
-        )
+        kw: dict[str, Any] = {}
+        if device is not None:
+            kw["device"] = device
+        if dtype is not None:
+            kw["dtype"] = dtype
+        pos_batch = pos_batch.to(**kw)
+        neg_batch = neg_batch.to(**kw)
+
+    # Collect per-region pooled outputs for SDXL y-conditioning.
+    def _get_pooled(entries: list[dict[str, Any]], idx: int) -> torch.Tensor | None:
+        extra = entries[idx].get("extra", {})
+        p = extra.get("pooled_output", None)
+        if p is None or not isinstance(p, torch.Tensor):
+            return None
+        p = p.detach()
+        if device is not None:
+            p = p.to(device=device)
+        if dtype is not None:
+            p = p.to(dtype=dtype)
+        return p
+
+    pos_pooled = [_get_pooled(runtime_inputs.positive_entries, i) for i in region_indices]
+    neg_pooled = [_get_pooled(runtime_inputs.negative_entries, i) for i in region_indices]
 
     return RegionalConditioningBatch(
         positive_crossattn=pos_batch,
         negative_crossattn=neg_batch,
         region_indices=list(region_indices),
         sequence_length=target_len,
+        positive_pooled=pos_pooled,
+        negative_pooled=neg_pooled,
     )
 
 
@@ -993,18 +1103,89 @@ def build_model_crossattn_batch(
     device,
     dtype,
 ) -> torch.Tensor:
+    """Build the cross-attention batch for the UNet call.
+
+    For each region, produces one tensor per cond_or_uncond flag (0=positive,
+    non-zero=negative), expanded to base_batch along dim 0.  The per-region y
+    (pooled_output) is handled separately by build_regional_y_batch.
+    """
+    assembled: list[torch.Tensor] = []
+    region_count = len(regional_batch.region_indices)
+
+    for region_offset in range(region_count):
+        pos_cross = regional_batch.positive_crossattn[region_offset:region_offset + 1]
+        neg_cross = regional_batch.negative_crossattn[region_offset:region_offset + 1]
+
+        for cond_flag in cond_or_uncond:
+            chosen = pos_cross if int(cond_flag) == 0 else neg_cross
+            chosen = chosen.to(device=device, dtype=dtype)
+            chosen = repeat_to_batch_size(chosen, base_batch, dim=0)
+            assembled.append(chosen)
+
+    return torch.cat(assembled, dim=0)
+
+
+def build_regional_y_batch(
+    regional_batch: RegionalConditioningBatch,
+    global_y: torch.Tensor,
+    cond_or_uncond: Sequence[int],
+    *,
+    base_batch: int,
+    device,
+    dtype,
+) -> torch.Tensor | None:
+    """Build a per-region y tensor for SDXL by injecting per-region pooled_output.
+
+    In SDXL, global_y has shape [B, 2816] = [pooled_1280 || size_embeds_1536].
+    We replace the first 1280 dimensions with each region's own pooled_output
+    while keeping the shared size/aesthetic embeddings intact.
+
+    Returns None if no pooled_output is available for any region (e.g. SD1.5).
+    Falls back to global_y for regions missing pooled_output.
+    """
+    has_any_pooled = any(
+        p is not None
+        for p in regional_batch.positive_pooled + regional_batch.negative_pooled
+    )
+    if not has_any_pooled:
+        return None
+
+    # SDXL pooled dimension is always 1280 (CLIP-G hidden size).
+    # If global_y is smaller, we can't safely inject – skip.
+    pooled_dim = 1280
+    if global_y.shape[-1] < pooled_dim:
+        return None
+
+    # Global y for a single (cond or uncond) item: shape [base_batch, y_dim]
+    # We need one global reference row to borrow the size-embedding tail from.
+    # Use the first row (all rows share the same aesthetic params).
+    y_ref = global_y[:1].to(device=device, dtype=dtype)  # [1, y_dim]
+
     assembled = []
     region_count = len(regional_batch.region_indices)
 
     for region_offset in range(region_count):
-        pos = regional_batch.positive_crossattn[region_offset:region_offset + 1]
-        neg = regional_batch.negative_crossattn[region_offset:region_offset + 1]
+        pos_p = regional_batch.positive_pooled[region_offset]
+        neg_p = regional_batch.negative_pooled[region_offset]
 
         for cond_flag in cond_or_uncond:
-            chosen = pos if int(cond_flag) == 0 else neg
-            chosen = chosen.to(device=device, dtype=dtype)
-            chosen = repeat_to_batch_size(chosen, base_batch, dim=0)
-            assembled.append(chosen)
+            chosen_p = pos_p if int(cond_flag) == 0 else neg_p
+            y_row = y_ref.clone()
+
+            if chosen_p is not None:
+                p = chosen_p.to(device=device, dtype=dtype)
+                if p.dim() == 1:
+                    p = p.unsqueeze(0)  # [pooled_dim] → [1, pooled_dim]
+
+                # Strict shape validation before injection.
+                # Only replace when the pooled tensor has exactly the expected
+                # dimension.  Any other shape means an architecture whose y
+                # layout we don't know; fall back to global y_ref for this slot.
+                if p.dim() == 2 and p.shape[0] >= 1 and p.shape[-1] == pooled_dim:
+                    y_row[:, :pooled_dim] = p[:1, :pooled_dim]
+
+            y_row = repeat_to_batch_size(y_row, base_batch, dim=0)
+            assembled.append(y_row)
 
     return torch.cat(assembled, dim=0)
 
@@ -1126,6 +1307,18 @@ class EgregoraAdaptiveRegionalMixer:
         self._debug_logged = False
 
     def build_batches(self) -> list[RuntimeRegionBatch]:
+        # Use length-aware batching when conditioning entries are available.
+        # This sorts regions by prompt length within each same-bbox-size group
+        # so that batches contain prompts of similar length, minimising
+        # zero-padding overhead — especially important at high region counts
+        # (6K+ upscaling) where users supply prompts of mixed lengths.
+        entries = self.runtime_inputs.positive_entries
+        if entries:
+            return build_region_batches_length_aware(
+                self.runtime_inputs.region_plan,
+                entries,
+                self.region_batch_size,
+            )
         return build_region_batches(self.runtime_inputs.region_plan, self.region_batch_size)
 
     def _ensure_weight_cache(self, latent: torch.Tensor) -> None:
@@ -1188,6 +1381,15 @@ class EgregoraAdaptiveRegionalMixer:
         print("[Egregora-ARMD] merged condition keys:", sorted(full_conditions.keys()))
         if "control" in full_conditions:
             print("[Egregora-ARMD] control present in conditioning")
+        # Note: region processing order may differ from spatial row-major order.
+        # build_region_batches_length_aware groups same-bbox-size regions by
+        # prompt length (longest first) to minimise cross-attention padding.
+        # This does not affect accumulation correctness — each region writes
+        # to its correct canvas position regardless of processing order.
+        batches = self.build_batches()
+        print(f"[Egregora-ARMD] region_count={self.runtime_inputs.region_plan.region_count} "
+              f"batch_count={len(batches)} "
+              f"region_indices_per_batch={[b.region_indices for b in batches]}")
         self._debug_logged = True
 
     def __call__(self, model_function, args):
@@ -1214,19 +1416,27 @@ class EgregoraAdaptiveRegionalMixer:
             raise ValueError("incoming latent batch is incompatible with cond_or_uncond groups")
         base_batch = latent.shape[0] // group_count
 
+        # Detect global y tensor for SDXL per-region pooled injection
+        global_y: torch.Tensor | None = None
+        if "y" in full_conditions and isinstance(full_conditions["y"], torch.Tensor):
+            global_y = full_conditions["y"]
+
         for batch in self.build_batches():
             x_regions = slice_latent_regions(latent, batch.context_bboxes)
             t_regions = repeat_to_batch_size(timestep, x_regions.shape[0], dim=0)
 
-            c_regions = {}
+            c_regions: dict[str, Any] = {}
             control_obj = None
 
             for key, value in full_conditions.items():
-                if key == "c_crossattn":
+                if key in ("c_crossattn", "y"):
                     continue
                 if key == "control":
-                    control_obj = clone_control_chain_for_batch(value, batch, latent, self.runtime_inputs.region_plan)
-                    if self.runtime_inputs.debug_runtime and not getattr(self, "_control_debug_logged", False):
+                    control_obj = clone_control_chain_for_batch(
+                        value, batch, latent, self.runtime_inputs.region_plan
+                    )
+                    if self.runtime_inputs.debug_runtime and \
+                            not getattr(self, "_control_debug_logged", False):
                         print("[Egregora-ARMD] control object type:", type(value))
                         if isinstance(value, dict):
                             print("[Egregora-ARMD] original control dict:")
@@ -1255,13 +1465,37 @@ class EgregoraAdaptiveRegionalMixer:
                 dtype=x_regions.dtype,
             )
 
+            # Per-region y injection for SDXL pooled_output.
+            # Each region gets its own pooled embedding instead of the global
+            # placeholder pooled.  Falls back to broadcast global_y when
+            # pooled_output is unavailable or architecture doesn't use y.
+            if global_y is not None:
+                regional_y = build_regional_y_batch(
+                    regional_batch,
+                    global_y,
+                    cond_or_uncond,
+                    base_batch=base_batch,
+                    device=x_regions.device,
+                    dtype=x_regions.dtype,
+                )
+                if regional_y is not None:
+                    c_regions["y"] = regional_y
+                else:
+                    gy = global_y.to(device=x_regions.device, dtype=x_regions.dtype)
+                    if gy.shape[0] != x_regions.shape[0]:
+                        gy = repeat_to_batch_size(gy, x_regions.shape[0], dim=0)
+                    c_regions["y"] = gy
+
             if control_obj is not None:
-                if self.runtime_inputs.debug_runtime and not getattr(self, "_control_call_debug_logged", False):
+                if self.runtime_inputs.debug_runtime and \
+                        not getattr(self, "_control_call_debug_logged", False):
                     print("[Egregora-ARMD] x_regions:", tuple(x_regions.shape))
-                    print("[Egregora-ARMD] context bboxes:", [bbox.box for bbox in batch.context_bboxes])
-                    print("[Egregora-ARMD] core bboxes:", [bbox.box for bbox in batch.core_bboxes])
-                    print("[Egregora-ARMD] write bboxes:", [bbox.box for bbox in batch.write_bboxes])
-                    print("[Egregora-ARMD] control dict sliced for current regional batch")
+                    print("[Egregora-ARMD] context bboxes:",
+                          [bbox.box for bbox in batch.context_bboxes])
+                    print("[Egregora-ARMD] core bboxes:",
+                          [bbox.box for bbox in batch.core_bboxes])
+                    print("[Egregora-ARMD] write bboxes:",
+                          [bbox.box for bbox in batch.write_bboxes])
                     self._control_call_debug_logged = True
                 c_regions["control"] = control_obj
 
