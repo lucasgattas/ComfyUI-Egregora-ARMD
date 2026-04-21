@@ -85,7 +85,7 @@ That balance is what makes ARMD effective both for:
 
 ---
 
-## 🆕 What changed in v0.1.1
+## 🆕 What changed in v0.1.2
 
 ### Bug fixes
 
@@ -147,7 +147,7 @@ It creates:
 
 These placeholders are useful for compatibility with nodes that still expect standard conditioning objects.
 
-In v0.1.1, regional conditioning also preserves:
+In v0.1.2, regional conditioning also preserves:
 - `c_crossattn`
 - `pooled_output` when available
 - extra conditioning fields needed for safer SDXL-like regional injection
@@ -164,7 +164,7 @@ It:
 - uses context regions for reading
 - writes back using feathered local ownership
 
-In v0.1.1, batching is also more efficient for mixed prompt sizes, and debug logging is clearer when batch order differs from spatial order.
+In v0.1.2, batching is also more efficient for mixed prompt sizes, and debug logging is clearer when batch order differs from spatial order.
 
 ### 🔎 Egregora Region Select
 Lets you inspect a single region for:
@@ -279,7 +279,7 @@ Negative prompts can be used in three ways:
 - provide **one** negative line → it is reused for all regions
 - provide one negative line per region
 
-In v0.1.1, negative prompts with text are handled much more safely than before, even when prompt lengths vary significantly.
+In v0.1.2, negative prompts with text are handled much more safely than before, even when prompt lengths vary significantly.
 
 ---
 
@@ -461,7 +461,7 @@ ARMD addresses that by combining:
 
 ## ⚙️ Important note about batching order
 
-In v0.1.1, ARMD may process regions in an order that differs from the spatial row-major order.
+In v0.1.2, ARMD may process regions in an order that differs from the spatial row-major order.
 
 This is intentional.
 
