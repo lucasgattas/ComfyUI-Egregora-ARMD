@@ -85,6 +85,31 @@ That balance is what makes ARMD effective both for:
 
 ---
 
+## 🎯 Current scope
+
+ARMD is currently focused on **regional creative upscaling and regional image generation inside ComfyUI**.
+
+The strongest practical scope is:
+
+- **SDXL-based workflows**
+- **Z-Image Turbo workflows**
+- tiled or high-resolution generation where one global prompt is too weak
+- workflows that benefit from regional prompts, captioner-generated prompts, or manually edited regional descriptions
+
+Z-Image Turbo is intentionally kept in scope because it can produce strong creative reconstruction results with ARMD, especially when regional prompts are clear and the workflow is tuned for high-resolution generation.
+
+SeedVR2 is **not** part of the core ARMD mechanism, but it is an important complementary upscaler / refinement stage. It can be used after ARMD, or together with tile-oriented workflows such as Divide-and-Enhance, to further improve texture, detail, and temporal or local consistency depending on the pipeline.
+
+In other words:
+
+- **ARMD** handles regional semantic coordination during diffusion.
+- **Divide-and-Enhance** remains useful for controlled tile extraction / reconstruction and conservative enhancement workflows.
+- **SeedVR2** can be used as a strong complementary enhancement or refinement method, especially when applied to well-prepared tiles or already coherent ARMD outputs.
+
+This project does not claim that ARMD replaces every upscaler. It is aimed at the specific problem of **regional semantic control in shared-canvas diffusion**.
+
+---
+
 ## 🆕 What changed in v0.1.2
 
 ### Bug fixes
@@ -92,12 +117,12 @@ That balance is what makes ARMD effective both for:
 - **Negative prompts with text now work correctly**
   - The previous cross-attention length strategy could cause OOM and visual deformation when prompt lengths differed too much.
   - ARMD now uses **max-length + zero-padding** instead of semantic repetition.
-  - This removes the LCM explosion problem and keeps token semantics intact.
+  - This avoids the LCM explosion problem and prevents explicit token duplication.
 
-- **`pooled_output` is now preserved for SDXL-like workflows**
+- **`pooled_output` is now preserved for SDXL-style workflows**
   - Regional conditioning now preserves `pooled_output` instead of dropping it.
   - Each region can inject its own pooled style embedding instead of inheriting only a global placeholder.
-  - This is especially important for **SDXL / Z-Image Turbo** style workflows.
+  - This is especially important for SDXL and Z-Image Turbo workflows where the conditioning layout is compatible.
 
 - **Unnecessary CPU↔GPU transfers were removed from conditioning**
   - Regional conditioning tensors are no longer forced through extra CPU round-trips before use.
@@ -150,7 +175,7 @@ These placeholders are useful for compatibility with nodes that still expect sta
 In v0.1.2, regional conditioning also preserves:
 - `c_crossattn`
 - `pooled_output` when available
-- extra conditioning fields needed for safer SDXL-like regional injection
+- extra conditioning fields needed for safer SDXL-style regional injection
 
 ### 🌐 Egregora Adaptive Diffusion Apply
 Applies ARMD to a model.
@@ -188,6 +213,8 @@ Restores the final image back to the original framing after `pad_reflect` alignm
 
 This is useful because ARMD may internally pad the image to a safer working canvas, while you still want the final output to match the original framing.
 
+Note: this node can restore padding-based alignment. It cannot recover pixels removed by `floor_crop`, because cropping is destructive.
+
 ---
 
 ## 🖼️ Alignment modes
@@ -210,6 +237,8 @@ This crops the image down to the nearest compatible size.
 
 Use it only if you explicitly prefer cropping over padding.
 
+Because this mode removes pixels, it is not reversible by `Egregora Restore Original Size`.
+
 ### Exact canvas fit when using IMAGE + LATENT
 When a LATENT defines the canvas and an IMAGE is also provided, ARMD uses an exact-canvas fitting path rather than reflect-padding the image arbitrarily.
 
@@ -219,7 +248,7 @@ This path now tolerates small upstream aspect-ratio rounding differences, while 
 
 ## 📏 Region planning and defaults
 
-ARMD now works best with a **core + context + feather** strategy.
+ARMD works best with a **core + context + feather** strategy.
 
 Recommended starting values:
 
@@ -336,6 +365,8 @@ In many cases:
 - **ARMD without ControlNet** is already stronger than a global-prompt tiled workflow
 - **ARMD with ControlNet** is stronger still when source structure matters
 
+Implementation note: ARMD can regionalize compatible spatial tensors and precomputed residual dictionaries. It does not guarantee automatic support for every native ControlNet chain or every architecture-specific ControlNet implementation. In particular, some Z-Image-specific ControlNet Union workflows may require separate integration.
+
 ---
 
 ## 🔍 What “creative upscaling” means here
@@ -414,7 +445,7 @@ If a LATENT is provided, ARMD can use it to define the exact working resolution 
 
 ---
 
-## 🔧 Recommended starting workflow
+## 🔧 Recommended starting workflows
 
 ### Upscaling workflow
 1. **Load image**
@@ -438,6 +469,14 @@ If a LATENT is provided, ARMD can use it to define the exact working resolution 
 7. **KSampler** with `denoise = 1.0`
 8. **VAE Decode Tiled**
 
+### ARMD + refinement workflow
+1. run ARMD to produce a coherent regional diffusion result
+2. optionally split the result into controlled tiles
+3. refine with a complementary upscaler such as SeedVR2
+4. recombine or continue with Divide-and-Enhance-style tile handling when local tile control is needed
+
+This workflow is useful when ARMD provides the semantic layout and SeedVR2 provides an additional refinement pass.
+
 ---
 
 ## 📌 Notes on tiled VAE encode / decode
@@ -456,6 +495,18 @@ ARMD addresses that by combining:
 - regional conditioning
 - context-aware denoising
 - controlled write-back
+
+---
+
+## 🧱 Notes on Divide-and-Enhance
+
+Divide-and-Enhance and ARMD solve related but different problems.
+
+**ARMD** is designed for regional semantic coordination during diffusion. It is most useful when different areas of the canvas need different prompts or different semantic behavior.
+
+**Divide-and-Enhance** remains useful when the goal is to divide, process, and recombine image regions in a more controlled tile pipeline. It can be especially helpful when used with non-diffusion or video-oriented refinement models such as SeedVR2, where the goal is not necessarily to inject different prompts into the denoising process, but to improve the already generated image through local enhancement.
+
+So Divide-and-Enhance is not made obsolete by ARMD. It remains a practical companion for workflows where tiled refinement, tile export, tile recombination, or post-diffusion enhancement is the main goal.
 
 ---
 
@@ -485,6 +536,22 @@ If `debug_runtime=True`, ARMD now prints:
 - `region_indices_per_batch`
 
 This makes the batching order explicit and easier to debug.
+
+---
+
+## 🧪 Research status
+
+ARMD is currently best understood as an **open technical implementation and research-oriented workflow**.
+
+The current implementation is supported by practical experiments and qualitative comparisons. A more formal scientific evaluation would require:
+
+- larger controlled test sets
+- fixed seeds and fixed baselines
+- ablation studies for context size, feather size, prompt strategy, and model choice
+- systematic comparison against global-prompt tiled diffusion, independent tiled img2img, and shared-canvas alternatives
+- human or perceptual evaluation for seam visibility, semantic consistency, and hallucination reduction
+
+This README therefore presents ARMD as a practical open-source method and experimental workflow, not as a fully benchmarked universal solution.
 
 ---
 
