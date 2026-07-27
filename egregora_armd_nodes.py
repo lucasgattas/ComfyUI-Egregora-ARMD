@@ -14,7 +14,7 @@ from comfy.utils import repeat_to_batch_size
 # version
 # ============================================================
 
-__version__ = "0.1.2"
+__version__ = "0.2.0"
 
 
 # ============================================================
@@ -626,6 +626,94 @@ def build_scaled_bboxes_for_plan(
     )
 
 
+def validate_spatial_tensor(
+    tensor: torch.Tensor,
+    *,
+    name: str = "tensor",
+) -> None:
+    """Validate tensors whose final two axes represent spatial H and W.
+
+    Supported examples:
+    - BCHW
+    - BCTHW
+    - layouts with additional non-spatial axes before H and W
+
+    ARMD always preserves every leading axis and tiles only the final two
+    spatial dimensions.
+    """
+    if not isinstance(tensor, torch.Tensor):
+        raise TypeError(f"{name} must be a torch.Tensor")
+
+    if tensor.ndim < 4:
+        raise ValueError(
+            f"{name} must have at least 4 dimensions with H and W "
+            f"in the final two axes; received shape {tuple(tensor.shape)}"
+        )
+
+    if int(tensor.shape[-2]) <= 0 or int(tensor.shape[-1]) <= 0:
+        raise ValueError(
+            f"{name} has invalid spatial dimensions: "
+            f"{tuple(tensor.shape)}"
+        )
+
+
+def spatial_slice_for_bbox(
+    bbox: RegionBBox,
+) -> tuple:
+    """Build an ellipsis-based slice preserving all leading axes."""
+    return (
+        ...,
+        slice(int(bbox.y), int(bbox.y2)),
+        slice(int(bbox.x), int(bbox.x2)),
+    )
+
+
+def expand_spatial_weight_for_tensor(
+    weight: torch.Tensor,
+    tensor: torch.Tensor,
+) -> torch.Tensor:
+    """Expand a [1, 1, H, W] weight to match BCHW or BCTHW tensors."""
+    validate_spatial_tensor(tensor, name="tensor")
+
+    if weight.ndim < 2:
+        raise ValueError(
+            f"weight must contain spatial axes; received "
+            f"shape {tuple(weight.shape)}"
+        )
+
+    while weight.ndim < tensor.ndim:
+        weight = weight.unsqueeze(-3)
+
+    if weight.ndim != tensor.ndim:
+        raise ValueError(
+            "weight rank could not be matched to tensor rank: "
+            f"weight={tuple(weight.shape)}, tensor={tuple(tensor.shape)}"
+        )
+
+    if (
+        int(weight.shape[-2]) != int(tensor.shape[-2])
+        or int(weight.shape[-1]) != int(tensor.shape[-1])
+    ):
+        raise ValueError(
+            "weight and tensor spatial dimensions do not match: "
+            f"weight={tuple(weight.shape)}, tensor={tuple(tensor.shape)}"
+        )
+
+    return weight
+
+
+def is_spatial_tensor_candidate(
+    value: Any,
+) -> bool:
+    """Return True for tensors that can carry H/W in their final axes."""
+    return (
+        isinstance(value, torch.Tensor)
+        and value.ndim >= 4
+        and int(value.shape[-2]) > 0
+        and int(value.shape[-1]) > 0
+    )
+
+
 def slice_spatial_tensor_for_region_batch(
     tensor: torch.Tensor,
     batch: "RuntimeRegionBatch",
@@ -634,8 +722,10 @@ def slice_spatial_tensor_for_region_batch(
     latent_height: int,
     latent_width: int,
 ) -> torch.Tensor:
-    if tensor.ndim != 4:
-        raise ValueError("spatial tensor must be 4D")
+    validate_spatial_tensor(
+        tensor,
+        name="spatial tensor",
+    )
 
     if tensor.shape[-2] == latent_height and tensor.shape[-1] == latent_width:
         bboxes = batch.context_bboxes
@@ -649,7 +739,10 @@ def slice_spatial_tensor_for_region_batch(
             raise ValueError("scaled bbox count mismatch")
         bboxes = [scaled_bboxes[i] for i in batch.region_indices]
 
-    slices = [tensor[:, :, bbox.y:bbox.y2, bbox.x:bbox.x2] for bbox in bboxes]
+    slices = [
+        tensor[spatial_slice_for_bbox(bbox)]
+        for bbox in bboxes
+    ]
     if not slices:
         raise ValueError("bboxes must be non-empty")
     return torch.cat(slices, dim=0)
@@ -659,8 +752,10 @@ def latent_dict_to_tensor(latent: dict[str, Any]) -> torch.Tensor:
     samples = latent.get("samples", None)
     if not isinstance(samples, torch.Tensor):
         raise ValueError("LATENT input must contain tensor under key 'samples'")
-    if samples.ndim != 4:
-        raise ValueError("LATENT samples tensor must be 4D")
+    validate_spatial_tensor(
+        samples,
+        name="LATENT samples tensor",
+    )
     return samples
 
 
@@ -730,8 +825,10 @@ class PackedSpatialTensorAdapter:
         for name, tensor in self.entries.items():
             if not isinstance(tensor, torch.Tensor):
                 raise ValueError(f"spatial adapter entry '{name}' is not a tensor")
-            if tensor.ndim != 4:
-                raise ValueError(f"spatial adapter entry '{name}' must be 4D")
+            validate_spatial_tensor(
+                tensor,
+                name=f"spatial adapter entry '{name}'",
+            )
             out[name] = tensor.to(device=latent.device)
         return out
 
@@ -936,20 +1033,54 @@ def build_region_batches_length_aware(
     return batches
 
 
-def slice_latent_regions(latent: torch.Tensor, bboxes: Sequence[RegionBBox]) -> torch.Tensor:
-    regions = [latent[:, :, bbox.y:bbox.y2, bbox.x:bbox.x2] for bbox in bboxes]
+def slice_latent_regions(
+    latent: torch.Tensor,
+    bboxes: Sequence[RegionBBox],
+) -> torch.Tensor:
+    validate_spatial_tensor(
+        latent,
+        name="latent",
+    )
+
+    regions = [
+        latent[spatial_slice_for_bbox(bbox)]
+        for bbox in bboxes
+    ]
+
     if not regions:
         raise ValueError("bboxes must be non-empty")
+
     return torch.cat(regions, dim=0)
 
 
-def initialize_canvas_state(latent: torch.Tensor) -> RuntimeCanvasState:
-    n, c, h, w = latent.shape
+def initialize_canvas_state(
+    latent: torch.Tensor,
+) -> RuntimeCanvasState:
+    validate_spatial_tensor(
+        latent,
+        name="latent",
+    )
+
+    h = int(latent.shape[-2])
+    w = int(latent.shape[-1])
+
+    # One singleton dimension for every non-spatial latent axis.
+    # BCHW  -> [1, 1, H, W]
+    # BCTHW -> [1, 1, 1, H, W]
+    weight_shape = (
+        (1,) * (latent.ndim - 2)
+        + (h, w)
+    )
+
     return RuntimeCanvasState(
         latent_height=h,
         latent_width=w,
-        output_accumulator=torch.zeros((n, c, h, w), device=latent.device, dtype=latent.dtype),
-        weight_accumulator=torch.zeros((1, 1, h, w), device=latent.device, dtype=torch.float32),
+        output_accumulator=torch.zeros_like(latent),
+        weight_accumulator=torch.zeros(
+            weight_shape,
+            device=latent.device,
+            dtype=torch.float32,
+        ),
     )
 
 
@@ -1197,19 +1328,80 @@ def accumulate_region_outputs(
     *,
     region_weights: list[torch.Tensor],
 ) -> None:
-    per_region_batch = region_outputs.shape[0] // len(region_batch.context_bboxes)
+    validate_spatial_tensor(
+        region_outputs,
+        name="region_outputs",
+    )
 
-    for i, bbox in enumerate(region_batch.context_bboxes):
-        weight = region_weights[i].to(
-            device=canvas_state.output_accumulator.device,
-            dtype=canvas_state.output_accumulator.dtype,
+    region_count = len(region_batch.context_bboxes)
+
+    if region_count <= 0:
+        raise ValueError(
+            "region_batch.context_bboxes must be non-empty"
         )
-        weighted = region_outputs[i * per_region_batch:(i + 1) * per_region_batch] * weight
-        canvas_state.output_accumulator[:, :, bbox.y:bbox.y2, bbox.x:bbox.x2] += weighted
-        canvas_state.weight_accumulator[:, :, bbox.y:bbox.y2, bbox.x:bbox.x2] += region_weights[i].to(
+
+    if len(region_weights) != region_count:
+        raise ValueError(
+            "region weight count does not match region count: "
+            f"{len(region_weights)} != {region_count}"
+        )
+
+    if region_outputs.shape[0] % region_count != 0:
+        raise ValueError(
+            "region output batch cannot be divided evenly among "
+            f"{region_count} regions; output shape is "
+            f"{tuple(region_outputs.shape)}"
+        )
+
+    per_region_batch = (
+        region_outputs.shape[0] // region_count
+    )
+
+    for i, bbox in enumerate(
+        region_batch.context_bboxes
+    ):
+        start = i * per_region_batch
+        end = (i + 1) * per_region_batch
+        current_output = region_outputs[start:end]
+
+        weight = region_weights[i].to(
+            device=current_output.device,
+            dtype=current_output.dtype,
+        )
+        weight = expand_spatial_weight_for_tensor(
+            weight,
+            current_output,
+        )
+
+        weighted = current_output * weight
+        spatial_slice = spatial_slice_for_bbox(bbox)
+
+        canvas_target = (
+            canvas_state.output_accumulator[
+                spatial_slice
+            ]
+        )
+
+        if canvas_target.shape != weighted.shape:
+            raise ValueError(
+                "regional output shape does not match canvas slice: "
+                f"output={tuple(weighted.shape)}, "
+                f"canvas={tuple(canvas_target.shape)}, "
+                f"bbox={bbox.box}"
+            )
+
+        canvas_state.output_accumulator[
+            spatial_slice
+        ] += weighted
+
+        canvas_weight = weight.to(
             device=canvas_state.weight_accumulator.device,
             dtype=canvas_state.weight_accumulator.dtype,
         )
+
+        canvas_state.weight_accumulator[
+            spatial_slice
+        ] += canvas_weight
 
 
 def finalize_canvas_output(canvas_state: RuntimeCanvasState, eps: float = 1e-8) -> torch.Tensor:
@@ -1228,7 +1420,7 @@ def _slice_control_value_for_batch(
     latent: torch.Tensor,
     region_plan: RegionPlan,
 ) -> Any:
-    if isinstance(value, torch.Tensor) and value.ndim == 4:
+    if is_spatial_tensor_candidate(value):
         return slice_spatial_tensor_for_region_batch(
             value,
             batch,
@@ -1350,7 +1542,7 @@ class EgregoraAdaptiveRegionalMixer:
         return self._runtime_tile_weights
 
     def _slice_condition_value(self, value: Any, batch: RuntimeRegionBatch, latent: torch.Tensor) -> Any:
-        if isinstance(value, torch.Tensor) and value.ndim == 4:
+        if is_spatial_tensor_candidate(value):
             return slice_spatial_tensor_for_region_batch(
                 value,
                 batch,
@@ -1374,7 +1566,20 @@ class EgregoraAdaptiveRegionalMixer:
     def _maybe_debug_log(self, latent: torch.Tensor, timestep: torch.Tensor, cond_dict: dict, cond_or_uncond: list[int], full_conditions: dict[str, Any]) -> None:
         if not self.runtime_inputs.debug_runtime or self._debug_logged:
             return
-        print("[Egregora-ARMD] latent:", tuple(latent.shape), latent.dtype, latent.device)
+        layout = (
+            "BCHW"
+            if latent.ndim == 4
+            else "BCTHW-compatible"
+            if latent.ndim == 5
+            else f"{latent.ndim}D-spatial"
+        )
+        print(
+            "[Egregora-ARMD] latent:",
+            tuple(latent.shape),
+            latent.dtype,
+            latent.device,
+            f"layout={layout}",
+        )
         print("[Egregora-ARMD] timestep:", tuple(timestep.shape) if hasattr(timestep, "shape") else type(timestep))
         print("[Egregora-ARMD] cond_or_uncond:", cond_or_uncond)
         print("[Egregora-ARMD] input c keys:", sorted(cond_dict.keys()))
@@ -1394,6 +1599,11 @@ class EgregoraAdaptiveRegionalMixer:
 
     def __call__(self, model_function, args):
         latent: torch.Tensor = args["input"]
+        validate_spatial_tensor(
+            latent,
+            name="incoming model latent",
+        )
+
         timestep: torch.Tensor = args["timestep"]
         cond_dict: dict = args["c"]
         cond_or_uncond = list(args.get("cond_or_uncond", [0, 1]))
